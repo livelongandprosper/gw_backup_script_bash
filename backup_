@@ -24,7 +24,7 @@ db_user=my_db_user
 db_host=locahost
 
 # Website-Ordner (wo liegende die zu sichernden Dateien)
-files_dir='/html/lebenswerkstatt-potsdam.de/'
+files_dir='/pfad/zum/website/root/'
 
 
 

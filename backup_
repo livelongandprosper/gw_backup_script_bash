@@ -1,0 +1,94 @@
+###
+# BackupScript zum Backup von Website
+# - Dateien einer Website
+# - Datenbank einer Website
+#
+# (c) Gregor Wendland 2017
+###
+
+################################
+################################
+################################
+## Variablen
+before=$(date +%s)
+
+# folgende Variablen anpassen
+
+# Dateiname von Backup-Dateien, die angelegt werden (ohne Suffix)
+projekt_basis_dateiname=website_backup
+
+# Datenbank Zugangsdaten (es empfiehlt sich einen Nur-Lesezugriff-Datenbankbenutzer dafür zu verwenden)
+db_password='myVerySecurePassword'
+db_name=my_db_name
+db_user=my_db_user
+db_host=locahost
+
+# Website-Ordner (wo liegende die zu sichernden Dateien)
+files_dir='/html/lebenswerkstatt-potsdam.de/'
+
+
+
+################################
+################################
+################################
+## ab hier ist alles automatisch
+# Dateien
+dateien_dateiname=$projekt_basis_dateiname'_'$(date +%Y-%m-%d_%H-%M-%S)'_'files
+db_dateiname=$projekt_basis_dateiname'_'$(date +%Y-%m-%d_%H-%M-%S)'_'$db_name
+
+# Dateiendungen
+dateiendung_zip=.zip
+db_dateiendung=.sql
+
+
+
+################################
+################################
+################################
+# Let the show begin...
+
+## Leerzeile
+clear
+echo
+
+echo "Sichern der Datenbank in Datei "$db_dateiname$dateiendung_zip" ..."
+mysqldump --replace -h$db_host -u$db_user -p$db_password $db_name > ./$db_dateiname$db_dateiendung
+echo "erledigt."
+echo
+
+echo "Nachbearbeiten der Sicherung ..."
+# DEFINER=`xyz` mit CURRENT_USER ersetzen
+sed -ri 's/DEFINER=`[^`]+`@`[^`]+`/DEFINER=CURRENT_USER/g' $db_dateiname$db_dateiendung
+echo "erledigt."
+echo
+
+# zip
+echo "ZIP-Datei von Sicherung erstellen $dateiname_converted$dateiendung$dateiendung_zip ..."
+zip $db_dateiname$db_dateiendung$dateiendung_zip $db_dateiname$db_dateiendung
+echo "erledigt."
+echo
+
+
+# sql-datei löschen
+echo "Unkomprimierte Datei löschen $dateiname$dateiendung ..."
+rm $db_dateiname$db_dateiendung
+echo "erledigt."
+echo
+
+# Dateien in unq.store 
+echo "ZIP-Datei von Dateien im Website-Verzeichnis ("$files_dir") erstellen ..."
+zip -rq $dateien_dateiname$dateiendung_zip $files_dir
+echo "erledigt."
+echo
+
+# Dateien, die älter als 14 Tage sind löschen
+#echo "ZIP-Dateien die älter als 14 Tage sind löschen ..."
+#find *.zip -mtime +14 -type f -delete
+#echo "erledigt."
+#echo
+
+
+## Vergangene Zeit
+after=$(date +%s)
+echo "Dauer des Backup-Vorgangs: " $((after - $before)) " Sekunden"
+echo

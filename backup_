@@ -60,7 +60,7 @@ clear
 echo
 
 echo "Sichern der Datenbank in Datei "$db_dateiname$dateiendung_zip" ..."
-mysqldump --replace -h$db_host -u$db_user -p$db_password $db_name > ./$db_dateiname$db_dateiendung
+mysqldump --replace --skip-lock-tables -h$db_host -u$db_user -p$db_password $db_name > ./$db_dateiname$db_dateiendung
 echo "erledigt."
 echo
 

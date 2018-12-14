@@ -1,4 +1,6 @@
 #!/bin/bash
+basename=$(pwd)
+
 before=$(date +%s)
 
 ###
@@ -6,6 +8,7 @@ before=$(date +%s)
 # - Dateien einer Website
 # - - optional können Dateien ausgeschlossen werden (files_dir_ignore)
 # - Datenbank einer Website
+# - Backup dateien können an entfernten Server via sftp oder rsync übertragen werden
 #
 # (c) Gregor Wendland 2017-2018 /// free to use, free to change, do what you want with this file, no warranty
 ###
@@ -21,16 +24,21 @@ before=$(date +%s)
 ################################
 ################################
 ################################
-## Variablen - anpassen
+## Variablen - anpassen!
 
 # Dateiname von Backup-Dateien, die angelegt werden (ohne Suffix)
 projekt_basis_dateiname='backup'
 
 # Datenbank Zugangsdaten (es empfiehlt sich einen Nur-Lesezugriff-Datenbankbenutzer dafür zu verwenden)
-db_password='myVerySecurePassword'
+db_host='localhost'
 db_name='my_db_name'
 db_user='my_db_user'
-db_host='localhost'
+db_password='myVerySecurePassword'
+db2_host=''
+db2_name=''
+db2_user=''
+db2_password=''
+
 
 # Website-Ordner (wo liegen die zu sichernden Dateien)
 source_files_dir='/pfad/zum/website/root/' # mehrere ordner mit leerzeichen trennen
@@ -51,58 +59,143 @@ rsync_user=''
 rsync_directory='' # relative to rynch users root directory
 rsync_key='/.ssh/id_rsa_backup.pub' # create key with  | ssh-keygen -t rsa -b 4096
 
+# lokale Backup-Dateien löschen, wenn übertragung funktioniert hat
+delete_if_transmitted=false
+
+# E-Mail-Benachrichtigung
+status_email_address=''
+alert_email_address=''
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
 ################################
 ################################
 ################################
 ## ab hier ist alles automatisch – es braucht nichts mehr angepasst werden
 
+## Funktionen
+# backup db
+#  parameter1: db_host
+#  parameter2: db_name
+#  parameter3: db_user
+#  parameter4: db_password
+function backup_db() {
+    local return_value=0
+    local db_host=$1
+    local db_name=$2
+    local db_user=$3
+    local db_password=$4
+	local db_dateiname=$backup_destiantion$projekt_basis_dateiname'_'$(date +%Y-%m-%d_%H-%M-%S)'_'$db_name
+
+    # Datenbanken sichern
+    if [ "$db_name" != "" ]
+    then
+        echo "Sichern der Datenbank in Datei "$db_dateiname$dateiendung_zip" ..." | tee -a $log_file_name
+        mysqldump --replace --skip-lock-tables -h$db_host -u$db_user -p$db_password $db_name > $db_dateiname$db_dateiendung | tee -a $log_file_name
+        echo "erledigt." | tee -a $log_file_name
+        echo
+
+        echo "Nachbearbeiten der Sicherung von "$db_dateiname$dateiendung_zip" ..." | tee -a $log_file_name
+        # DEFINER=`xyz` mit CURRENT_USER ersetzen
+        sed -ri 's/DEFINER=`[^`]+`@`[^`]+`/DEFINER=CURRENT_USER/g' $db_dateiname$db_dateiendung | tee -a $log_file_name
+        echo "erledigt." | tee -a $log_file_name
+        echo | tee -a $log_file_name
+
+        # zip
+        echo "ZIP-Datei von Sicherung erstellen $db_dateiname$db_dateiendung$dateiendung_zip ..." | tee -a $log_file_name
+        zip $db_dateiname$db_dateiendung$dateiendung_zip $db_dateiname$db_dateiendung | tee -a $log_file_name
+        if [ "$?" -eq "0" ]
+        then
+            # sql-datei löschen
+            echo "Unkomprimierte Datei löschen $dateiname$dateiendung ..." | tee -a $log_file_name
+            rm -v $db_dateiname$db_dateiendung | tee -a $log_file_name
+            echo | tee -a $log_file_name
+        else
+            echo "Zip-Datei konnte nicht erstellt werden. $db_dateiname$db_dateiendung$db_dateiendung bleibt erhalt." | tee -a $log_file_name
+        fi
+        echo | tee -a $log_file_name
+    fi
+
+
+    return ${return_value}
+}
+
 # Backup Zielordner
-backup_destiantion="./$projekt_basis_dateiname/"
+backup_destiantion=$basename"/$projekt_basis_dateiname/"
 mkdir -p $backup_destiantion
-mkdir -p './log/'
+mkdir -p $basename'/log/'
+
+# TODO: create .htaccess with deny from all statement
 
 # Dateien
 dateien_dateiname=$backup_destiantion$projekt_basis_dateiname'_'$(date +%Y-%m-%d_%H-%M-%S)'_'files
-db_dateiname=$backup_destiantion$projekt_basis_dateiname'_'$(date +%Y-%m-%d_%H-%M-%S)'_'$db_name
-log_file_name='log/'$projekt_basis_dateiname'_'$(date +%Y-%m-%d_%H-%M-%S)'.log'
+log_file_name=$basename'/log/'$projekt_basis_dateiname'_'$(date +%Y-%m-%d_%H-%M-%S)'.log'
 
 # Dateiendungen
 dateiendung_zip='.zip'
 db_dateiendung='.sql'
+
+# Kontrollvariablen
+transmitted=''
 
 
 ################################
 ################################
 ################################
 # Let the show begin...
-
-## Leerzeile
 clear
+
+echo "======================================" | tee -a $log_file_name
+echo "Backup $projekt_basis_dateiname" | tee -a $log_file_name
+echo "$(date)" | tee -a $log_file_name
+echo "Script is located"
+echo "$basename"
+echo "======================================" | tee -a $log_file_name
+echo "backup files will be saved here $backup_destiantion"| tee -a $log_file_name
+echo "======================================" | tee -a $log_file_name
+echo | tee -a $log_file_name
 echo
-date | tee -a $log_file_name
-echo "Sichern der Datenbank in Datei "$db_dateiname$dateiendung_zip" ..." | tee -a $log_file_name
-mysqldump --replace --skip-lock-tables -h$db_host -u$db_user -p$db_password $db_name > $db_dateiname$db_dateiendung | tee -a $log_file_name
-echo "erledigt." | tee -a $log_file_name
-echo
 
-echo "Nachbearbeiten der Sicherung ..." | tee -a $log_file_name
-# DEFINER=`xyz` mit CURRENT_USER ersetzen
-sed -ri 's/DEFINER=`[^`]+`@`[^`]+`/DEFINER=CURRENT_USER/g' $db_dateiname$db_dateiendung | tee -a $log_file_name
-echo "erledigt." | tee -a $log_file_name
-echo | tee -a $log_file_name
+# Datenbanken sichern
+if [ "$db_name" != "" ]
+then
+    backup_db "$db_host" "$db_name" "$db_user" "$db_password"
+fi
+if [ "$db2_name" != "" ]
+then
+    backup_db "$db2_host" "$db2_name" "$db2_user" "$db2_password"
+fi
 
-# zip
-echo "ZIP-Datei von Sicherung erstellen $dateiname_converted$dateiendung$dateiendung_zip ..." | tee -a $log_file_name
-zip $db_dateiname$db_dateiendung$dateiendung_zip $db_dateiname$db_dateiendung | tee -a $log_file_name
-echo "erledigt." | tee -a $log_file_name
-echo | tee -a $log_file_name
 
-# sql-datei löschen
-echo "Unkomprimierte Datei löschen $dateiname$dateiendung ..." | tee -a $log_file_name
-rm -v $db_dateiname$db_dateiendung | tee -a $log_file_name
-echo | tee -a $log_file_name
-
-# Dateien zippen 
+# Dateien zippen
 echo "ZIP-Datei von Dateien im Website-Verzeichnis ("$source_files_dir") erstellen ..." | tee -a $log_file_name
 if [ "$source_files_dir_ignore" != "" ]
 then
@@ -115,25 +208,32 @@ echo "erledigt."
 echo
 
 # Dateien per rsync synchronisieren (rsync)
-echo "Dateien auf entfernten Server synchronisieren (rsync)..." | tee -a $log_file_name
 if [ "$rysnc_host" != "" ]
 then
+    echo "Dateien auf entfernten Server synchronisieren (rsync)..." | tee -a $log_file_name
     echo " entfernter Ordner: "$rsync_directory | tee -a $log_file_name
     if [ "$rsync_key" != "" ]
     then
-        rsync -rltDvzre "ssh -i $rsync_key" $backup_destiantion $rsync_user@$rysnc_host:$rsync_directory | tee -a $log_file_name
+        rsync -rltDvzre "ssh -i $rsync_key" --progress $backup_destiantion $rsync_user@$rysnc_host:$rsync_directory | tee -a $log_file_name
     else
-        rsync -rltDvzre "ssh" $backup_destiantion $rsync_user@$rysnc_host:$rsync_directory | tee -a $log_file_name
+        rsync -rltDvzre "ssh" --progress $backup_destiantion $rsync_user@$rysnc_host:$rsync_directory | tee -a $log_file_name
     fi
-else
-    echo " wird ausgelassen. (keine Zugangsdaten hinterlegt)" | tee -a $log_file_name
+
+    # Wurden die Daten übertragen?
+    if [ "$?" -eq "0" ]
+    then
+      transmitted='true'
+    else
+      transmitted=''
+      echo "Error while running rsync" | tee -a $log_file_name
+    fi
 fi
 echo | tee -a $log_file_name
 
 # Dateien per sftp kopieren sftp
-echo "Dateien auf entfernten Server kopieren (sftp)..." | tee -a $log_file_name
 if [ "$sftp_host" != "" ]
 then
+    echo "Dateien auf entfernten Server kopieren (sftp)..." | tee -a $log_file_name
     # batchfile für sftp erstellen
     if [ "$sftp_directory" != "" ]
     then
@@ -149,6 +249,15 @@ then
     # hier ist der eigentliche upload auf den backup-server
     sftp -S $sftp_path_to_ssh_binary -b $sftp_batchfile -o PubkeyAuthentication=yes -o IdentityFile=$sftp_key -o Port=$sftp_port $sftp_user@$sftp_host | tee -a $log_file_name
 
+    # Wurden die Daten übertragen?
+    if [ "$?" -eq "0" ]
+    then
+      transmitted='true'
+    else
+      transmitted=''
+      echo "Error while running sftp" | tee -a $log_file_name
+    fi
+
     # Dokumenation in logfile
     echo "logfile content:" >> $log_file_name
     echo "-----" >> $log_file_name
@@ -158,12 +267,13 @@ then
     # batch file löschen
     rm -v $sftp_batchfile | tee -a $log_file_name
     echo | tee -a $log_file_name
-else
-    echo " wird ausgelassen. (keine Zugangsdaten hinterlegt)" | tee -a $log_file_name
-    echo | tee -a $log_file_name
 fi
 
+# TODO: implement delete of files if files were transmitted and if delete_if_transmitted is true
 
+# Status per E-Mail senden
+# TODO: implement mail status
+# echo '' | mail -s "Backup $projekt_basis_dateiname $(date +%s)" "$status_email_address"
 
 ## Dateien, die älter als 14 Tage sind löschen
 #echo "ZIP-Dateien die älter als 14 Tage sind löschen ..."

@@ -118,7 +118,12 @@ else
 fi
 echo | tee -a $log_file_name
 
-# TODO: implement delete of files if files were transmitted and if delete_if_transmitted is true
+# Dateien, die älter als 14 Tage sind löschen
+echo "Dateien in $backup_cache_folder älter als 14 Tage löschen ..." | tee -a $log_file_name
+find $backup_cache_folder* -mtime +14 -type f -delete -print ! -regex '*.sh' | tee -a $log_file_name
+echo "erledigt." | tee -a $log_file_name
+echo | tee -a $log_file_name
+
 
 # Status per E-Mail senden
 # TODO: implement mail status

@@ -59,6 +59,9 @@ rsync_user=''
 rsync_directory='' # relative to rynch users root directory
 rsync_key='/.ssh/id_rsa_backup.pub' # create key with  | ssh-keygen -t rsa -b 4096
 
+# Backup Lebenszeit (0 entspricht unendlich)
+backup_live_time=0
+
 # lokale Backup-Dateien löschen, wenn übertragung funktioniert hat
 delete_if_transmitted=false
 
@@ -210,7 +213,8 @@ echo
 # Dateien per rsync synchronisieren (rsync)
 if [ "$rysnc_host" != "" ]
 then
-    echo "Dateien auf entfernten Server synchronisieren (rsync)..." | tee -a $log_file_name
+    echo "Dateien von entferntem Server synchronisieren (rsync)..." | tee -a $log_file_name
+    echo " lokaler Ordner: "$backup_destiantion | tee -a $log_file_name
     echo " entfernter Ordner: "$rsync_directory | tee -a $log_file_name
     if [ "$rsync_key" != "" ]
     then
@@ -269,18 +273,18 @@ then
     echo | tee -a $log_file_name
 fi
 
-# TODO: implement delete of files if files were transmitted and if delete_if_transmitted is true
+# Dateien, die älter als $backup_live_time Tage sind löschen
+if [ \( "$backup_destiantion" != "" \) -a \( "$backup_live_time" != "0" \) ]
+then
+    echo "Dateien in $backup_destiantion älter als $backup_live_time Tage löschen ..." | tee -a $log_file_name
+    find $backup_destiantion* -mtime +$backup_live_time -type f -delete -print ! -regex '*.sh' | tee -a $log_file_name
+    echo "erledigt." | tee -a $log_file_name
+    echo | tee -a $log_file_name
+fi
 
 # Status per E-Mail senden
 # TODO: implement mail status
 # echo '' | mail -s "Backup $projekt_basis_dateiname $(date +%s)" "$status_email_address"
-
-## Dateien, die älter als 14 Tage sind löschen
-#echo "ZIP-Dateien die älter als 14 Tage sind löschen ..."
-#find *.zip -mtime +14 -type f -delete
-#echo "erledigt."
-#echo
-
 
 ## Vergangene Zeit
 after=$(date +%s)

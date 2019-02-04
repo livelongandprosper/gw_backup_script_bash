@@ -7,7 +7,7 @@ before=$(date +%s)
 ###
 # Backup File Sync Proxy Script
 #
-# (c) Gregor Wendland 2018 /// free to use, free to change, do what you want with this file, no warranty
+# (c) Gregor Wendland 2018-2019 /// free to use, free to change, do what you want with this file, no warranty
 ###
 
 ################################
@@ -33,6 +33,12 @@ rsync_destination_ssh_key_path='/.ssh/id_rsa_backup.pub' # create key with | ssh
 # lokale Backup-Dateien löschen, wenn übertragung funktioniert hat
 delete_if_transmitted=false
 
+# Backup Lebenszeit
+backup_live_time=0
+
+# Backup Cache Lebenszeit (lokal gespeicherte Backups)
+backup_localcache_time=7
+
 # E-Mail-Benachrichtigung
 status_email_address=''
 alert_email_address=''
@@ -40,6 +46,37 @@ alert_email_address=''
 # Backup Zielordner
 backup_cache_folder="$basename/../backup_files/$projekt_basis_dateiname/" # better use absolute path / should be outside of backup script folder
 
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
+# .
 ################################
 ################################
 ################################
@@ -76,6 +113,8 @@ then
     echo "======================================"
     echo "Dateien von entferntem Server laden (rsync)..." | tee -a $log_file_name
     echo " entfernter Ordner: "$rsync_source_directory | tee -a $log_file_name
+    echo " lokaler Ordner: "$backup_cache_folder | tee -a $log_file_name
+    echo " $rsync_source_directory > $backup_cache_folder" | tee -a $log_file_name
     if [ "$rsync_source_key" != "" ]
     then
         rsync -rltDvzre "ssh -i $rsync_source_ssh_key_path" --progress $rsync_source_user@$rysnc_source_host:$rsync_source_directory $backup_cache_folder | tee -a $log_file_name
@@ -97,7 +136,9 @@ then
 
     # Dateien sichern (rsync)
     echo "Dateien zum Zielserver übertragen (rsync)..." | tee -a $log_file_name
+    echo " lokaler Ordner: "$backup_cache_folder | tee -a $log_file_name
     echo " entfernter Ordner: "$rsync_destination_directory | tee -a $log_file_name
+    echo " $backup_cache_folder > $rsync_destination_directory" | tee -a $log_file_name
     if [ "$rsync_destination_key" != "" ]
     then
         rsync -rltDvzre "ssh -i $rsync_destination_ssh_key_path" --progress $backup_cache_folder $rsync_destination_user@$rysnc_destination_host:$rsync_destination_directory  | tee -a $log_file_name
@@ -118,11 +159,17 @@ else
 fi
 echo | tee -a $log_file_name
 
-# Dateien, die älter als 14 Tage sind löschen
-echo "Dateien in $backup_cache_folder älter als 14 Tage löschen ..." | tee -a $log_file_name
-find $backup_cache_folder* -mtime +14 -type f -delete -print ! -regex '*.sh' | tee -a $log_file_name
-echo "erledigt." | tee -a $log_file_name
-echo | tee -a $log_file_name
+# Dateien, die älter als $backup_localcache_time Tage sind löschen
+if [ \( "$backup_cache_folder" != "" \) -a \( "$backup_localcache_time" != "0" \) ]
+then
+    echo "Dateien in $backup_cache_folder älter als $backup_localcache_time Tage löschen ..." | tee -a $log_file_name
+    find $backup_cache_folder* -mtime +$backup_localcache_time -type f -delete -print ! -regex '*.sh' | tee -a $log_file_name
+    echo "erledigt." | tee -a $log_file_name
+    echo | tee -a $log_file_name
+fi
+
+# Alte Backups, älter als $backup_live_time von Backup-Ziel-Speicher löschen
+# TODO: implement delete of remote feil server files after $backup_live_time is over
 
 
 # Status per E-Mail senden

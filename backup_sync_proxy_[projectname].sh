@@ -1,4 +1,4 @@
-#!/bin/
+#!/bin/bash
 script="$0"
 basename="$(dirname $script)"
 
@@ -6,6 +6,8 @@ before=$(date +%s)
 
 ###
 # Backup File Sync Proxy Script
+#
+# Put this file to a server that should fetch backuped data and put to another server
 #
 # (c) Gregor Wendland 2018-2019 /// free to use, free to change, do what you want with this file, no warranty
 ###

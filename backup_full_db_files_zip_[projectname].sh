@@ -133,20 +133,24 @@ function backup_db() {
         echo | tee -a $log_file_name
 
         # zip
-        echo "ZIP-Datei von Sicherung erstellen $db_dateiname$db_dateiendung$dateiendung_zip ..." | tee -a $log_file_name
-        zip $db_dateiname$db_dateiendung$dateiendung_zip $db_dateiname$db_dateiendung | tee -a $log_file_name
-        if [ "$?" -eq "0" ]
-        then
-            # sql-datei löschen
-            echo "Unkomprimierte Datei löschen $dateiname$dateiendung ..." | tee -a $log_file_name
-            rm -v $db_dateiname$db_dateiendung | tee -a $log_file_name
-            echo | tee -a $log_file_name
+        if ! [ -x "$(command -v zip)" ]; then
+            echo 'Error: zip is not installed.' | tee -a $log_file_name >&2
+            echo 'sql file is not compressed' | tee -a $log_file_name
         else
-            echo "Zip-Datei konnte nicht erstellt werden. $db_dateiname$db_dateiendung$db_dateiendung bleibt erhalt." | tee -a $log_file_name
+            echo "ZIP-Datei von Sicherung erstellen $db_dateiname$db_dateiendung$dateiendung_zip ..." | tee -a $log_file_name
+            zip $db_dateiname$db_dateiendung$dateiendung_zip $db_dateiname$db_dateiendung | tee -a $log_file_name
+            if [ "$?" -eq "0" ]
+            then
+                # sql-datei löschen
+                echo "Unkomprimierte Datei löschen $dateiname$dateiendung ..." | tee -a $log_file_name
+                rm -v $db_dateiname$db_dateiendung | tee -a $log_file_name
+                echo | tee -a $log_file_name
+            else
+                echo "Zip-Datei konnte nicht erstellt werden. $db_dateiname$db_dateiendung$db_dateiendung bleibt erhalt." | tee -a $log_file_name
+            fi
+            echo | tee -a $log_file_name
         fi
-        echo | tee -a $log_file_name
     fi
-
 
     return ${return_value}
 }
@@ -199,16 +203,24 @@ fi
 
 
 # Dateien zippen
-echo "ZIP-Datei von Dateien im Website-Verzeichnis ("$source_files_dir") erstellen ..." | tee -a $log_file_name
-if [ "$source_files_dir_ignore" != "" ]
+if [ "$source_files_dir" != "" ]
 then
-	echo " ausgeschlossene(r) Ordner: ${source_files_dir_ignore[@]}" | tee -a $log_file_name
-	zip -rq $dateien_dateiname$dateiendung_zip $source_files_dir -x ${source_files_dir_ignore[@]} | tee -a $log_file_name
-else
-	zip -rq $dateien_dateiname$dateiendung_zip $source_files_dir | tee -a $log_file_name
+    if ! [ -x "$(command -v zip)" ]; then
+        echo 'Error: zip is not installed.' | tee -a $log_file_name >&2
+        echo 'files could not be packed into zip file' | tee -a $log_file_name
+    else
+        echo "ZIP-Datei von Dateien im Website-Verzeichnis ("$source_files_dir") erstellen ..." | tee -a $log_file_name
+        if [ "$source_files_dir_ignore" != "" ]
+        then
+            echo " ausgeschlossene(r) Ordner: ${source_files_dir_ignore[@]}" | tee -a $log_file_name
+            zip -rq $dateien_dateiname$dateiendung_zip $source_files_dir -x ${source_files_dir_ignore[@]} | tee -a $log_file_name
+        else
+            zip -rq $dateien_dateiname$dateiendung_zip $source_files_dir | tee -a $log_file_name
+        fi
+        echo "erledigt."
+        echo
+    fi
 fi
-echo "erledigt."
-echo
 
 # Dateien per rsync synchronisieren (rsync)
 if [ "$rysnc_host" != "" ]

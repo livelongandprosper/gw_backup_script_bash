@@ -62,8 +62,8 @@ rsync_key='/.ssh/id_rsa_backup' # private key on server; upload public key to re
 # Backup Lebenszeit (0 entspricht unendlich)
 backup_live_time=0
 
-# lokale Backup-Dateien löschen, wenn übertragung funktioniert hat
-delete_if_transmitted=false
+# alle lokalen Backup-Dateien des Projektes löschen, wenn Übertragung funktioniert hat
+delete_if_transmitted='false' # true | false
 
 # E-Mail-Benachrichtigung
 status_email_address=''
@@ -225,7 +225,7 @@ fi
 # Dateien per rsync synchronisieren (rsync)
 if [ "$rysnc_host" != "" ]
 then
-    echo "Dateien von entferntem Server synchronisieren (rsync)..." | tee -a $log_file_name
+    echo "Dateien zu entferntem Server synchronisieren (rsync)..." | tee -a $log_file_name
     echo " lokaler Ordner: "$backup_destiantion | tee -a $log_file_name
     echo " entfernter Ordner: "$rsync_directory | tee -a $log_file_name
     if [ "$rsync_key" != "" ]
@@ -283,6 +283,16 @@ then
     # batch file löschen
     rm -v $sftp_batchfile | tee -a $log_file_name
     echo | tee -a $log_file_name
+fi
+
+# Dateien löschen, wenn erfolgreich übermittelt wurde
+if [ \( "$delete_if_transmitted" == "true" \) -a \( "$transmitted" == "true" \) ]
+then
+    echo "Dateien in $backup_destiantion werden nach erfolgreicher Übertragung gelöscht ..." | tee -a $log_file_name
+    rm -v $backup_destiantion* | tee -a $log_file_name
+    echo "erledigt." | tee -a $log_file_name
+    echo | tee -a $log_file_name
+    echo
 fi
 
 # Dateien, die älter als $backup_live_time Tage sind löschen

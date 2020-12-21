@@ -57,7 +57,7 @@ sftp_path_to_ssh_binary='/usr/local/rsync/bin/ssh'
 rysnc_host=''
 rsync_user=''
 rsync_directory='' # relative to rynch users root directory
-rsync_key='/.ssh/id_rsa_backup.pub' # create key with  | ssh-keygen -t rsa -b 4096
+rsync_key='/.ssh/id_rsa_backup' # private key on server; upload public key to remote server | create key with ssh-keygen -t rsa -b 4096
 
 # Backup Lebenszeit (0 entspricht unendlich)
 backup_live_time=0

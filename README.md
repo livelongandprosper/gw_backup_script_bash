@@ -1,5 +1,7 @@
 # Backup scripts #
 
+Free to use. Feedback is welcome: Gregor Wendland, hello@gregor-wendland.com, https://gregor-wendland.com/anfrage-an-webentwickler/
+
 ## backup_full_db_files_zip_\[projectname\].sh ##
 - Dateien werden gezipt, Datenbankdump mit mysqldump erstellt und gezipt
     - beim packen der Dateien ist es möglich Ordner auszuschließen

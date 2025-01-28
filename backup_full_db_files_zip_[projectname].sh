@@ -160,8 +160,14 @@ backup_destiantion=$basename"/$projekt_basis_dateiname/"
 mkdir -p $backup_destiantion
 mkdir -p $basename'/log/'
 
-# TODO: create .htaccess with deny from all statement
-
+# .htaccess generieren, falls noch nicht vorhanden
+htaccess_file="$backup_destiantion/.htaccess"
+if [ ! -f "$htaccess_file" ]; then
+    echo "deny from all" > "$htaccess_file"
+    echo ".htaccess-Datei wurde erstellt, um den Zugriff zu verweigern." | tee -a $log_file_name
+else
+    echo ".htaccess-Datei existiert" | tee -a $log_file_name
+fi
 # Dateien
 dateien_dateiname=$backup_destiantion$projekt_basis_dateiname'_'$(date +%Y-%m-%d_%H-%M-%S)'_'files
 log_file_name=$basename'/log/'$projekt_basis_dateiname'_'$(date +%Y-%m-%d_%H-%M-%S)'.log'
@@ -303,10 +309,6 @@ then
     echo "erledigt." | tee -a $log_file_name
     echo | tee -a $log_file_name
 fi
-
-# Status per E-Mail senden
-# TODO: implement mail status
-# echo '' | mail -s "Backup $projekt_basis_dateiname $(date +%s)" "$status_email_address"
 
 ## Vergangene Zeit
 after=$(date +%s)

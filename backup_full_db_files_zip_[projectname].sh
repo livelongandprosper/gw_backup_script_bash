@@ -168,6 +168,7 @@ if [ ! -f "$htaccess_file" ]; then
 else
     echo ".htaccess-Datei existiert" | tee -a $log_file_name
 fi
+
 # Dateien
 dateien_dateiname=$backup_destiantion$projekt_basis_dateiname'_'$(date +%Y-%m-%d_%H-%M-%S)'_'files
 log_file_name=$basename'/log/'$projekt_basis_dateiname'_'$(date +%Y-%m-%d_%H-%M-%S)'.log'

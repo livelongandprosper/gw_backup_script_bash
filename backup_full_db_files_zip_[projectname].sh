@@ -10,7 +10,7 @@ before=$(date +%s)
 # - Datenbank einer Website
 # - Backup dateien können an entfernten Server via sftp oder rsync übertragen werden
 #
-# (c) Gregor Wendland 2017-2018 /// free to use, free to change, do what you want with this file, no warranty
+# (c) Gregor Wendland 2017-2025 /// free to use, free to change, do what you want with this file, no warranty
 ###
 #
 # Wieder-einspielen der Datenbank (Beispiele):

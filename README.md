@@ -14,6 +14,7 @@ Free to use. Feedback is welcome: Gregor Wendland, hello@gregor-wendland.com, ht
 - Jeder backup-Vorgang wird in einer Log-Datei dokumentiert
 - eine gesicherte Datenbank kann interaktiv wieder eingespielt werden (`--restore`)
 - beim Einrichten eines Projekts kann optional die Größe des zu sichernden Datenordners angezeigt werden
+- beim Aufruf ohne Parameter im Terminal erscheint ein interaktives Hauptmenü mit allen Aktionen
 
 ### Einrichtung / Zugangsdaten ###
 Das Skript kann für beliebig viele Projekte im selben Ordner verwendet werden. Jedes
@@ -39,15 +40,51 @@ Eine `.env.example` liegt als Referenz bei, welche Werte konfiguriert werden kö
 `.gitignore` von der Versionsverwaltung ausgeschlossen – sie sollten niemals
 eingecheckt werden.
 
-### Projekt- und Umfang-Auswahl beim Backup ###
-Beim Aufruf ohne Parameter fragt das Skript interaktiv nach, welches Projekt
-gesichert werden soll (sofern mehrere `.env.*`-Dateien vorhanden sind) und was
-gesichert werden soll (alles / nur Datenbank(en) / nur Dateien) – letzteres nur,
-falls im Projekt kein `DEFAULT_SCOPE` hinterlegt ist. Für nicht-interaktive Aufrufe
-(z.B. per Cronjob) stehen zwei Parameter zur Verfügung:
+### Interaktives Hauptmenü ###
+Wird das Skript in einem Terminal ohne jegliche Parameter aufgerufen, erscheint
+ein Hauptmenü, über das sich alle Funktionen bequem auswählen lassen – ohne
+dass man sich die einzelnen CLI-Parameter merken muss:
 
 ```
-./backup_full_db_files_zip.sh                          # interaktiv
+======================================
+BackupScript - Hauptmenü
+======================================
+  1) Ein Projekt sichern
+  2) Alle Projekte sichern
+  3) Neues Projekt einrichten
+  4) Datenbank wiederherstellen
+  5) Projekt-Datengröße anzeigen
+  6) Projektübersicht anzeigen
+  0) Beenden
+======================================
+```
+
+- **Ein Projekt sichern**: sichert ein einzelnes Projekt (Auswahl, falls mehrere vorhanden
+  sind); fragt dabei immer, was gesichert werden soll (Standard/nur Datenbank(en)/nur
+  Dateien/alles).
+- **Alle Projekte sichern**: sichert nacheinander alle konfigurierten Projekte; fragt
+  vorher ebenfalls nach dem gewünschten Umfang (Standard/nur Datenbank(en)/nur
+  Dateien/alles), der dann für alle Projekte verwendet wird.
+- **Neues Projekt einrichten**: fragt einen Projektnamen ab und startet direkt den
+  Setup-Assistenten für dieses neue Projekt (inkl. anschließendem ersten Backup).
+- **Datenbank wiederherstellen**: entspricht `--restore` (siehe unten).
+- **Projekt-Datengröße anzeigen**: zeigt die Größe des Website-Ordners sowie der
+  bisherigen Backups eines Projekts an (`du -sh`).
+- **Projektübersicht anzeigen**: listet alle konfigurierten Projekte mit Anzahl der
+  Datenbanken, Website-Ordner, Standard-Umfang und dem letzten Backup auf.
+
+Das Menü wird nur angezeigt, wenn das Skript interaktiv (in einem Terminal) und
+komplett ohne Parameter aufgerufen wird. Sobald ein Parameter übergeben wird
+(z.B. `--project=`, `--scope=` oder `--restore`), wird das Menü übersprungen und
+direkt wie angegeben verfahren – dadurch bleiben bestehende Cronjobs unverändert
+lauffähig.
+
+### Projekt- und Umfang-Auswahl beim Backup ###
+Für nicht-interaktive Aufrufe (z.B. per Cronjob) stehen zwei Parameter zur
+Verfügung, die auch weiterhin ohne Menü direkt funktionieren:
+
+```
+./backup_full_db_files_zip.sh                          # interaktiv: zeigt das Hauptmenü
 ./backup_full_db_files_zip.sh --project=kundeA          # nur Projekt "kundeA"
 ./backup_full_db_files_zip.sh --project=alle            # alle Projekte
 ./backup_full_db_files_zip.sh --project=alle --scope=db # bei allen Projekten nur die Datenbank(en)
@@ -55,7 +92,9 @@ falls im Projekt kein `DEFAULT_SCOPE` hinterlegt ist. Für nicht-interaktive Auf
 ```
 
 Wird `--project=<name>` mit einem noch unbekannten Namen angegeben, startet
-automatisch der Setup-Assistent für dieses neue Projekt.
+automatisch der Setup-Assistent für dieses neue Projekt. Fehlt der `--scope`-Parameter
+und ist im Projekt kein `DEFAULT_SCOPE` hinterlegt, wird interaktiv danach gefragt
+(alles / nur Datenbank(en) / nur Dateien).
 
 ### Datenbank wiederherstellen (`--restore`) ###
 Um eine gesicherte Datenbank wieder einzuspielen, steht der Parameter `--restore`

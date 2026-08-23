@@ -29,13 +29,18 @@ before=$(date +%s)
 #
 # Aufruf-Beispiele:
 #   ./backup_full_db_files_zip.sh
-#       -> interaktiv: fragt Projekt (falls mehrere vorhanden) und Umfang (alles/db/dateien) ab
+#       -> interaktiv: zeigt ein Hauptmenü an (Projekt sichern, alle sichern, neues Projekt
+#          einrichten, Datenbank wiederherstellen, Datengröße/Übersicht anzeigen, Beenden)
 #   ./backup_full_db_files_zip.sh --project=kundeA
-#       -> sichert nur das Projekt "kundeA" (existiert keine .env.kundeA, wird der Setup-Assistent dafür gestartet)
+#       -> sichert nur das Projekt "kundeA" ohne Menü (existiert keine .env.kundeA, wird der Setup-Assistent dafür gestartet)
 #   ./backup_full_db_files_zip.sh --project=alle --scope=db
 #       -> sichert bei allen konfigurierten Projekten nur die Datenbank(en) (z.B. für Cronjobs)
 #   ./backup_full_db_files_zip.sh --restore --project=kundeA
 #       -> stellt interaktiv eine Datenbank des Projekts "kundeA" aus einem vorhandenen Backup wieder her
+#
+# Wird das Skript ohne jegliche Parameter in einem Terminal aufgerufen, erscheint immer
+# das interaktive Hauptmenü. Werden Parameter übergeben (z.B. --project/--scope/--restore),
+# wird das Menü übersprungen und direkt wie angegeben verfahren - das hält Cronjobs unangetastet.
 #
 ###
 
@@ -60,11 +65,11 @@ for cli_arg in "$@"; do
             restore_mode='true'
             ;;
         --help|-h)
-            echo "Verwendung: $0 [--project=<name>|alle] [--scope=alles|db|dateien]"
+            echo "Verwendung: $0 [--project=<name>|alle] [--scope=alles|db|dateien] [--restore]"
             echo "  --project   Projekt-Konfiguration (.env.<name>), die verwendet werden soll. 'alle' verarbeitet alle gefundenen Projekte."
             echo "  --scope     Was gesichert werden soll: alles (Standard), db (nur Datenbank(en)) oder dateien (nur Website-Dateien)."
             echo "  --restore   Datenbank aus einem vorhandenen Backup wiederherstellen (interaktiv), statt ein Backup zu erstellen."
-            echo "Ohne Parameter wird interaktiv nachgefragt, sofern nötig."
+            echo "Ohne Parameter wird im Terminal das interaktive Hauptmenü angezeigt."
             exit 0
             ;;
         *)
@@ -448,6 +453,186 @@ function run_restore_for_project() {
     return $restore_result
 }
 
+# Zeigt eine Übersicht aller konfigurierten Projekte (Datenbanken, Website-Ordner, Standard-Umfang, letztes Backup)
+function show_project_overview() {
+    echo "======================================"
+    echo "Projektübersicht"
+    echo "======================================"
+    local overview_env_file
+    for overview_env_file in "${env_files[@]}"; do
+        local overview_project_name
+        overview_project_name="$(project_name_from_env_file "$overview_env_file")"
+
+        # shellcheck source=/dev/null
+        source "$overview_env_file"
+
+        local overview_db_count="${DB_COUNT:-0}"
+        if [ "$overview_db_count" -eq 0 ] 2>/dev/null; then
+            [ -n "$DB_NAME" ] && overview_db_count=$((overview_db_count + 1))
+            [ -n "$DB2_NAME" ] && overview_db_count=$((overview_db_count + 1))
+        fi
+
+        local overview_basis="${PROJEKT_BASIS_DATEINAME:-$overview_project_name}"
+        local overview_backup_dir="$basename/$overview_basis/"
+        local overview_last_backup='keine Backups vorhanden'
+        if [ -d "$overview_backup_dir" ]; then
+            local overview_latest_file
+            overview_latest_file="$(ls -t "$overview_backup_dir" 2>/dev/null | grep -v '.htaccess' | head -n 1)"
+            [ -n "$overview_latest_file" ] && overview_last_backup="$overview_latest_file"
+        fi
+
+        echo
+        echo "Projekt: $overview_project_name"
+        echo "  Datenbanken: $overview_db_count"
+        echo "  Website-Ordner: ${SOURCE_FILES_DIR:-(nicht konfiguriert)}"
+        echo "  Standard-Umfang: ${DEFAULT_SCOPE:-alles}"
+        echo "  Letztes Backup: $overview_last_backup"
+    done
+    echo
+    echo "======================================"
+    echo
+}
+
+# Zeigt die Größe des Website-Ordners sowie der bisherigen Backups eines Projekts an
+function show_project_data_size() {
+    local size_env_file
+    if [ "${#env_files[@]}" -eq 1 ]; then
+        size_env_file="${env_files[0]}"
+    else
+        echo "======================================"
+        echo "Für welches Projekt soll die Datengröße angezeigt werden?"
+        local size_index=1
+        local existing_env_file
+        for existing_env_file in "${env_files[@]}"; do
+            echo "  $size_index) $(project_name_from_env_file "$existing_env_file")"
+            size_index=$((size_index + 1))
+        done
+        echo "======================================"
+        read -rp "Projekt auswählen (Nummer): " size_choice
+        size_env_file="${env_files[$((size_choice - 1))]}"
+    fi
+
+    if [ -z "$size_env_file" ]; then
+        echo "Ungültige Auswahl." >&2
+        return 1
+    fi
+
+    local size_project_name
+    size_project_name="$(project_name_from_env_file "$size_env_file")"
+
+    # shellcheck source=/dev/null
+    source "$size_env_file"
+
+    echo
+    echo "======================================"
+    echo "Datengröße für Projekt '$size_project_name'"
+    echo "======================================"
+    if [ -n "$SOURCE_FILES_DIR" ] && [ -d "$SOURCE_FILES_DIR" ]; then
+        echo "Website-Ordner ($SOURCE_FILES_DIR):"
+        du -sh "$SOURCE_FILES_DIR" 2>/dev/null
+    else
+        echo "Website-Ordner ist nicht konfiguriert oder existiert nicht."
+    fi
+
+    local size_basis="${PROJEKT_BASIS_DATEINAME:-$size_project_name}"
+    local size_backup_dir="$basename/$size_basis/"
+    if [ -d "$size_backup_dir" ]; then
+        echo "Bisherige Backups ($size_backup_dir):"
+        du -sh "$size_backup_dir" 2>/dev/null
+    fi
+    echo "======================================"
+    echo
+}
+
+# Fragt interaktiv ab, was gesichert werden soll (Standard/db/dateien/alles) und setzt cli_scope entsprechend.
+# Wird vom Hauptmenü vor dem eigentlichen Backup aufgerufen, damit der Umfang bei jedem
+# manuellen Lauf bewusst gewählt werden kann, statt stillschweigend den gespeicherten
+# DEFAULT_SCOPE aus der .env-Datei zu verwenden.
+function prompt_scope_choice() {
+    echo
+    echo "Was soll gesichert werden?"
+    echo "  1) Standard (wie im Projekt konfiguriert)"
+    echo "  2) Nur Datenbank(en)"
+    echo "  3) Nur Dateien"
+    echo "  4) Alles (Datenbank(en) + Dateien)"
+    read -rp "Auswahl [1]: " scope_menu_choice
+    case "$scope_menu_choice" in
+        2)
+            cli_scope="db"
+            ;;
+        3)
+            cli_scope="dateien"
+            ;;
+        4)
+            cli_scope="alles"
+            ;;
+        *)
+            # leer = Standard: verwendet den gespeicherten DEFAULT_SCOPE bzw. fragt sonst nach
+            cli_scope=""
+            ;;
+    esac
+}
+
+# Interaktives Hauptmenü, das beim Aufruf ohne Parameter angezeigt wird
+# Setzt bei Bedarf cli_project/cli_scope/restore_mode und kehrt zurück, damit der übrige
+# Skript-Ablauf unverändert weiterläuft, oder führt reine Info-Aktionen direkt aus.
+function run_main_menu() {
+    while true; do
+        echo
+        echo "======================================"
+        echo "BackupScript - Hauptmenü"
+        echo "======================================"
+        echo "  1) Ein Projekt sichern"
+        echo "  2) Alle Projekte sichern"
+        echo "  3) Neues Projekt einrichten"
+        echo "  4) Datenbank wiederherstellen"
+        echo "  5) Projekt-Datengröße anzeigen"
+        echo "  6) Projektübersicht anzeigen"
+        echo "  0) Beenden"
+        echo "======================================"
+        read -rp "Auswahl: " menu_choice
+
+        case "$menu_choice" in
+            1)
+                prompt_scope_choice
+                return 0
+                ;;
+            2)
+                cli_project='alle'
+                prompt_scope_choice
+                return 0
+                ;;
+            3)
+                read -rp "Name für das neue Projekt (wird für Dateinamen verwendet, z.B. 'kundeA'): " menu_new_project_name
+                menu_new_project_name=${menu_new_project_name// /_}
+                if [ -z "$menu_new_project_name" ]; then
+                    echo "Kein Projektname angegeben." >&2
+                    continue
+                fi
+                cli_project="$menu_new_project_name"
+                return 0
+                ;;
+            4)
+                restore_mode='true'
+                return 0
+                ;;
+            5)
+                show_project_data_size
+                ;;
+            6)
+                show_project_overview
+                ;;
+            0)
+                echo "Beendet."
+                exit 0
+                ;;
+            *)
+                echo "Ungültige Auswahl." >&2
+                ;;
+        esac
+    done
+}
+
 # Kein Projekt vorhanden -> Setup-Assistent für ein neues Projekt starten
 if [ "${#env_files[@]}" -eq 0 ]; then
     echo "======================================"
@@ -463,6 +648,13 @@ if [ "${#env_files[@]}" -eq 0 ]; then
     fi
     run_setup_assistant "$new_project_name"
     env_files=("$basename/.env.$new_project_name")
+fi
+
+# Interaktives Hauptmenü anzeigen, wenn das Skript ohne Parameter aufgerufen wird
+# (z.B. manueller Aufruf im Terminal). Bei Aufrufen mit Parametern (z.B. per Cron)
+# wird das Menü übersprungen und wie bisher direkt mit den Parametern gearbeitet.
+if [ $# -eq 0 ] && [ -t 0 ]; then
+    run_main_menu
 fi
 
 # Restore-Modus (--restore): statt eines Backups wird eine Datenbank wiederhergestellt

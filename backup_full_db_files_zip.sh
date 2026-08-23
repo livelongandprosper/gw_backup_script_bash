@@ -19,9 +19,9 @@ before=$(date +%s)
 # (c) Gregor Wendland 2017-2025 /// free to use, free to change, do what you want with this file, no warranty
 ###
 #
-# Wieder-einspielen der Datenbank (Beispiele):
-# mysql -h'localhost' -p'myVerySecurePassword' -u'my_db_user' 'my_db_name' < db_backup.sql
-# mysql -h$db_host -u$db_user -p$db_password $db_name < db_backup.sql
+# Wieder-einspielen der Datenbank:
+# ./backup_full_db_files_zip.sh --restore [--project=<name>]
+# (fragt interaktiv nach Datenbank und Backup-Datei, entpackt .zip-Backups automatisch)
 #
 # Dateien müssen bei einer Wiederherstellung mit unzip entpackt werden.
 #
@@ -34,6 +34,8 @@ before=$(date +%s)
 #       -> sichert nur das Projekt "kundeA" (existiert keine .env.kundeA, wird der Setup-Assistent dafür gestartet)
 #   ./backup_full_db_files_zip.sh --project=alle --scope=db
 #       -> sichert bei allen konfigurierten Projekten nur die Datenbank(en) (z.B. für Cronjobs)
+#   ./backup_full_db_files_zip.sh --restore --project=kundeA
+#       -> stellt interaktiv eine Datenbank des Projekts "kundeA" aus einem vorhandenen Backup wieder her
 #
 ###
 
@@ -44,6 +46,7 @@ before=$(date +%s)
 
 cli_project=''
 cli_scope=''
+restore_mode='false'
 
 for cli_arg in "$@"; do
     case "$cli_arg" in
@@ -53,10 +56,14 @@ for cli_arg in "$@"; do
         --scope=*)
             cli_scope="${cli_arg#*=}"
             ;;
+        --restore)
+            restore_mode='true'
+            ;;
         --help|-h)
             echo "Verwendung: $0 [--project=<name>|alle] [--scope=alles|db|dateien]"
             echo "  --project   Projekt-Konfiguration (.env.<name>), die verwendet werden soll. 'alle' verarbeitet alle gefundenen Projekte."
             echo "  --scope     Was gesichert werden soll: alles (Standard), db (nur Datenbank(en)) oder dateien (nur Website-Dateien)."
+            echo "  --restore   Datenbank aus einem vorhandenen Backup wiederherstellen (interaktiv), statt ein Backup zu erstellen."
             echo "Ohne Parameter wird interaktiv nachgefragt, sofern nötig."
             exit 0
             ;;
@@ -145,6 +152,13 @@ function run_setup_assistant() {
 
     echo
     read -rp "Website-Ordner, der gesichert werden soll (absoluter Pfad): " source_files_dir
+    if [ -n "$source_files_dir" ] && [ -d "$source_files_dir" ]; then
+        read -rp "Größe dieses Ordners anzeigen? Kann bei großen Ordnern etwas dauern (j/N): " show_folder_size
+        if [[ "$show_folder_size" =~ ^[jJyY]$ ]]; then
+            echo "Ermittle Ordnergröße ..."
+            du -sh "$source_files_dir" 2>/dev/null
+        fi
+    fi
     read -rp "Auszuschließende Ordner-Muster, Leerzeichen-getrennt (z.B. '*/media/*' '*/cache/*'), optional: " source_files_dir_ignore
 
     echo
@@ -287,6 +301,153 @@ function project_name_from_env_file() {
     fi
 }
 
+# Datenbank aus einem vorhandenen Backup wiederherstellen
+#  parameter1: Pfad zur .env-Datei des Projekts
+function run_restore_for_project() {
+    local project_env_file="$1"
+    local project_name
+    project_name="$(project_name_from_env_file "$project_env_file")"
+
+    # shellcheck source=/dev/null
+    source "$project_env_file"
+
+    local projekt_basis_dateiname="${PROJEKT_BASIS_DATEINAME:-$project_name}"
+    local backup_destiantion="$basename/$projekt_basis_dateiname/"
+
+    # Datenbanken einlesen (gleiche Logik wie beim Backup)
+    local db_hosts=()
+    local db_names=()
+    local db_users=()
+    local db_passwords=()
+    if [ -n "$DB_COUNT" ]; then
+        local db_read_i
+        for ((db_read_i=1; db_read_i<=DB_COUNT; db_read_i++)); do
+            local host_var="DB_${db_read_i}_HOST"
+            local name_var="DB_${db_read_i}_NAME"
+            local user_var="DB_${db_read_i}_USER"
+            local password_var="DB_${db_read_i}_PASSWORD"
+            db_hosts+=("${!host_var}")
+            db_names+=("${!name_var}")
+            db_users+=("${!user_var}")
+            db_passwords+=("${!password_var}")
+        done
+    else
+        if [ -n "$DB_NAME" ]; then
+            db_hosts+=("${DB_HOST:-localhost}")
+            db_names+=("$DB_NAME")
+            db_users+=("$DB_USER")
+            db_passwords+=("$DB_PASSWORD")
+        fi
+        if [ -n "$DB2_NAME" ]; then
+            db_hosts+=("${DB2_HOST:-localhost}")
+            db_names+=("$DB2_NAME")
+            db_users+=("$DB2_USER")
+            db_passwords+=("$DB2_PASSWORD")
+        fi
+    fi
+
+    if [ "${#db_names[@]}" -eq 0 ]; then
+        echo "Für Projekt '$project_name' ist keine Datenbank konfiguriert." >&2
+        return 1
+    fi
+
+    echo "======================================"
+    echo "Datenbank-Wiederherstellung für Projekt '$project_name'"
+    echo "======================================"
+
+    local restore_db_index=0
+    if [ "${#db_names[@]}" -gt 1 ]; then
+        echo "Welche Datenbank soll wiederhergestellt werden?"
+        local i
+        for ((i=0; i<${#db_names[@]}; i++)); do
+            echo "  $((i + 1))) ${db_names[$i]} (Host: ${db_hosts[$i]})"
+        done
+        read -rp "Datenbank auswählen (Nummer): " db_choice
+        restore_db_index=$((db_choice - 1))
+    fi
+
+    local restore_db_host="${db_hosts[$restore_db_index]}"
+    local restore_db_name="${db_names[$restore_db_index]}"
+    local restore_db_user="${db_users[$restore_db_index]}"
+    local restore_db_password="${db_passwords[$restore_db_index]}"
+
+    if [ -z "$restore_db_name" ]; then
+        echo "Ungültige Auswahl." >&2
+        return 1
+    fi
+
+    echo
+    echo "Verfügbare Backup-Dateien für '$restore_db_name' in $backup_destiantion:"
+    shopt -s nullglob
+    local available_backups=("$backup_destiantion"*"_${restore_db_name}.sql" "$backup_destiantion"*"_${restore_db_name}.sql.zip")
+    shopt -u nullglob
+
+    local backup_file_to_restore=''
+    if [ "${#available_backups[@]}" -gt 0 ]; then
+        local avail_i
+        for ((avail_i=0; avail_i<${#available_backups[@]}; avail_i++)); do
+            echo "  $((avail_i + 1))) $(basename "${available_backups[$avail_i]}")"
+        done
+        echo "  m) manuell Pfad angeben"
+        read -rp "Backup-Datei auswählen (Nummer oder 'm'): " backup_choice
+        if [ "$backup_choice" == "m" ]; then
+            read -rp "Pfad zur Backup-Datei (.sql oder .zip): " backup_file_to_restore
+        else
+            backup_file_to_restore="${available_backups[$((backup_choice - 1))]}"
+        fi
+    else
+        echo "  (keine automatisch gefundenen Backups)"
+        read -rp "Pfad zur Backup-Datei (.sql oder .zip): " backup_file_to_restore
+    fi
+
+    if [ ! -f "$backup_file_to_restore" ]; then
+        echo "Datei '$backup_file_to_restore' nicht gefunden." >&2
+        return 1
+    fi
+
+    local sql_file_to_import="$backup_file_to_restore"
+    local temp_extract_dir=''
+    if [[ "$backup_file_to_restore" == *.zip ]]; then
+        if ! [ -x "$(command -v unzip)" ]; then
+            echo "Error: unzip ist nicht installiert." >&2
+            return 1
+        fi
+        temp_extract_dir="$(mktemp -d)"
+        unzip -q "$backup_file_to_restore" -d "$temp_extract_dir"
+        sql_file_to_import="$(find "$temp_extract_dir" -name '*.sql' -type f | head -n 1)"
+        if [ -z "$sql_file_to_import" ]; then
+            echo "Keine .sql-Datei im Zip-Archiv gefunden." >&2
+            rm -rf "$temp_extract_dir"
+            return 1
+        fi
+    fi
+
+    echo
+    echo "ACHTUNG: Die Datenbank '$restore_db_name' auf Host '$restore_db_host' wird mit dem Inhalt von"
+    echo "  $sql_file_to_import"
+    echo "überschrieben. Bestehende Daten in dieser Datenbank können dabei verloren gehen!"
+    read -rp "Fortfahren? (ja/NEIN): " restore_confirm
+    if [ "$restore_confirm" != "ja" ]; then
+        echo "Abgebrochen."
+        [ -n "$temp_extract_dir" ] && rm -rf "$temp_extract_dir"
+        return 1
+    fi
+
+    echo "Importiere $sql_file_to_import in Datenbank $restore_db_name ..."
+    MYSQL_PWD="$restore_db_password" mysql -h"$restore_db_host" -u"$restore_db_user" "$restore_db_name" < "$sql_file_to_import"
+    local restore_result=$?
+
+    [ -n "$temp_extract_dir" ] && rm -rf "$temp_extract_dir"
+
+    if [ "$restore_result" -eq 0 ]; then
+        echo "Datenbank '$restore_db_name' wurde erfolgreich wiederhergestellt."
+    else
+        echo "Fehler beim Wiederherstellen der Datenbank '$restore_db_name'." >&2
+    fi
+
+    return $restore_result
+}
+
 # Kein Projekt vorhanden -> Setup-Assistent für ein neues Projekt starten
 if [ "${#env_files[@]}" -eq 0 ]; then
     echo "======================================"
@@ -302,6 +463,44 @@ if [ "${#env_files[@]}" -eq 0 ]; then
     fi
     run_setup_assistant "$new_project_name"
     env_files=("$basename/.env.$new_project_name")
+fi
+
+# Restore-Modus (--restore): statt eines Backups wird eine Datenbank wiederhergestellt
+if [ "$restore_mode" == "true" ]; then
+    if [ "$cli_project" == "alle" ]; then
+        echo "Restore kann nur für ein einzelnes Projekt durchgeführt werden. Bitte --project=<name> verwenden." >&2
+        exit 1
+    fi
+
+    restore_target_env_file=''
+    if [ -n "$cli_project" ]; then
+        match_env_file="$basename/.env.$cli_project"
+        if [ "$cli_project" == "default" ] && [ -f "$legacy_env_file" ]; then
+            restore_target_env_file="$legacy_env_file"
+        elif [ -f "$match_env_file" ]; then
+            restore_target_env_file="$match_env_file"
+        else
+            echo "Kein Projekt '$cli_project' gefunden." >&2
+            exit 1
+        fi
+    elif [ "${#env_files[@]}" -eq 1 ]; then
+        restore_target_env_file="${env_files[0]}"
+    else
+        echo "======================================"
+        echo "Für welches Projekt soll eine Datenbank wiederhergestellt werden?"
+        project_index=1
+        for existing_env_file in "${env_files[@]}"; do
+            echo "  $project_index) $(project_name_from_env_file "$existing_env_file")"
+            project_index=$((project_index + 1))
+        done
+        echo "======================================"
+        read -rp "Projekt auswählen (Nummer): " project_choice
+        selected_index=$((project_choice - 1))
+        restore_target_env_file="${env_files[$selected_index]}"
+    fi
+
+    run_restore_for_project "$restore_target_env_file"
+    exit $?
 fi
 
 # Projekt(e) auswählen, die in diesem Lauf verarbeitet werden sollen

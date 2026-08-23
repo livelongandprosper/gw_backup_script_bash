@@ -12,6 +12,8 @@ Free to use. Feedback is welcome: Gregor Wendland, hello@gregor-wendland.com, ht
 - Backup-Dateien werden in ein Projekt-Verzeichnis gespeichert
 - Speichern der Backup-Dateien via sftp oder rsync möglich
 - Jeder backup-Vorgang wird in einer Log-Datei dokumentiert
+- eine gesicherte Datenbank kann interaktiv wieder eingespielt werden (`--restore`)
+- beim Einrichten eines Projekts kann optional die Größe des zu sichernden Datenordners angezeigt werden
 
 ### Einrichtung / Zugangsdaten ###
 Das Skript kann für beliebig viele Projekte im selben Ordner verwendet werden. Jedes
@@ -54,6 +56,31 @@ falls im Projekt kein `DEFAULT_SCOPE` hinterlegt ist. Für nicht-interaktive Auf
 
 Wird `--project=<name>` mit einem noch unbekannten Namen angegeben, startet
 automatisch der Setup-Assistent für dieses neue Projekt.
+
+### Datenbank wiederherstellen (`--restore`) ###
+Um eine gesicherte Datenbank wieder einzuspielen, steht der Parameter `--restore`
+zur Verfügung:
+
+```
+./backup_full_db_files_zip.sh --restore                    # Projekt ggf. interaktiv wählen
+./backup_full_db_files_zip.sh --restore --project=kundeA    # Restore für Projekt "kundeA"
+```
+
+Das Skript fragt (falls das Projekt mehr als eine Datenbank hat) nach der
+gewünschten Datenbank, schlägt automatisch gefundene Backup-Dateien im
+Projekt-Verzeichnis zur Auswahl vor (`.sql` und `.sql.zip`, alternativ ist auch
+die manuelle Angabe eines Pfads möglich) und entpackt gezippte Backups bei
+Bedarf automatisch. Vor dem eigentlichen Import mit `mysql` muss der Vorgang
+noch einmal ausdrücklich mit `ja` bestätigt werden, da die Zieldatenbank dabei
+überschrieben wird. `--restore` funktioniert immer nur für ein einzelnes
+Projekt (kein `--project=alle`).
+
+### Größe des Datenordners anzeigen ###
+Beim Einrichten eines Projekts (Setup-Assistent) wird nach dem Website-Ordner
+gefragt, der gesichert werden soll. Existiert dieser Ordner bereits, kann
+optional dessen Größe (`du -sh`) angezeigt werden – praktisch, um vorab
+abzuschätzen, wie groß das Datei-Backup ungefähr wird. Bei sehr großen Ordnern
+kann die Ermittlung der Größe etwas dauern.
 
 ## backup_sync_proxy_\[projectname\].sh ##
 

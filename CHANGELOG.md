@@ -12,6 +12,7 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
 ### Hinzugefügt
 - **Pre-Backup & System-/Sicherheitsprüfungen (`--check` / Menüpunkt 5):**
   - Automatischer Vorab-Check vor jedem Backup sowie manuell über das Hauptmenü oder CLI-Parameter `--check` / `--pre-check`.
+  - Vollständige und transparente Pfadangaben: Bei allen Diagnosen, Warnungen, erkannten Log-Dateien, Webshells und Konfigurationsdateien wird stets der vollständige absolute Pfad angegeben.
   - Farbcodierte visuelle Auswertung (`[✓ OK]` grün, `[⚠ WARNUNG]` gelb, `[✖ ACHTUNG]` rot, `[ℹ INFO]` cyan) mit Zusammenfassungsfazit im Terminal und sauberer Klartext-Dokumentation im Logfile.
   - **WordPress-Diagnose:** Erkennung und Warnung bei aktivem `WP_DEBUG` und gefährlichem `WP_DEBUG_DISPLAY` (Frontend-Fehlerausgabe an Besucher).
   - **Log-Überwachung:** Aufspüren von `wp-content/debug.log` mit Größenwarnung (> 10 MB) sowie Standard-PHP-`error_log`-Dateien.

@@ -1215,7 +1215,7 @@ function show_project_overview() {
         if [ -d "$overview_backup_dir" ]; then
             local overview_latest_file
             overview_latest_file="$(ls -t "$overview_backup_dir" 2>/dev/null | grep -v '.htaccess' | head -n 1)"
-            [ -n "$overview_latest_file" ] && overview_last_backup="$overview_latest_file"
+            [ -n "$overview_latest_file" ] && overview_last_backup="$overview_backup_dir$overview_latest_file"
         fi
 
         echo
@@ -1373,20 +1373,20 @@ function run_pre_backup_checks() {
         # a) WP_DEBUG
         local is_debug="${WP_PARSED_DEBUG:-false}"
         if [ "$is_debug" == "true" ] || [ "$is_debug" == "1" ]; then
-            log_check_item "WARN" "WP_DEBUG ist AKTIVIERT (nicht empfohlen für den Produktivbetrieb)" "$log_target" "Vor Updates und im laufenden Betrieb deaktivieren, um Log-Überlauf zu vermeiden."
+            log_check_item "WARN" "WP_DEBUG ist in '$wp_config_candidate' AKTIVIERT (nicht empfohlen für den Produktivbetrieb)" "$log_target" "Vor Updates und im laufenden Betrieb deaktivieren, um Log-Überlauf zu vermeiden."
             check_warn_count=$((check_warn_count + 1))
         else
-            log_check_item "OK" "WP_DEBUG ist deaktiviert (Produktionsmodus aktiv)" "$log_target"
+            log_check_item "OK" "WP_DEBUG ist in '$wp_config_candidate' deaktiviert (Produktionsmodus aktiv)" "$log_target"
             check_ok_count=$((check_ok_count + 1))
         fi
 
         # b) WP_DEBUG_DISPLAY
         local is_display="${WP_PARSED_DEBUG_DISPLAY:-false}"
         if [ "$is_display" == "true" ] || [ "$is_display" == "1" ]; then
-            log_check_item "ALERT" "WP_DEBUG_DISPLAY ist AKTIVIERT!" "$log_target" "PHP-Fehlermeldungen und interne Pfade werden öffentlich im Browser für Besucher angezeigt!"
+            log_check_item "ALERT" "WP_DEBUG_DISPLAY ist in '$wp_config_candidate' AKTIVIERT!" "$log_target" "PHP-Fehlermeldungen und interne Pfade werden öffentlich im Browser für Besucher angezeigt!"
             check_alert_count=$((check_alert_count + 1))
         else
-            log_check_item "OK" "WP_DEBUG_DISPLAY ist deaktiviert (keine Fehlerausgabe an Besucher)" "$log_target"
+            log_check_item "OK" "WP_DEBUG_DISPLAY ist in '$wp_config_candidate' deaktiviert (keine Fehlerausgabe an Besucher)" "$log_target"
             check_ok_count=$((check_ok_count + 1))
         fi
 
@@ -1405,14 +1405,14 @@ function run_pre_backup_checks() {
             dlog_kb=${dlog_kb:-0}
 
             if [ "$dlog_kb" -gt 10240 ]; then # > 10 MB
-                log_check_item "ALERT" "wp-content/debug.log existiert und ist SEHR GROSS (${dlog_size:-${dlog_kb}KB})!" "$log_target" "Enthält viele akkumulierte PHP-Fehler; sollte vor/nach Updates geprüft und geleert werden."
+                log_check_item "ALERT" "Debug-Log '$debug_log_path' existiert und ist SEHR GROSS (${dlog_size:-${dlog_kb}KB})!" "$log_target" "Enthält viele akkumulierte PHP-Fehler; sollte vor/nach Updates geprüft und geleert werden."
                 check_alert_count=$((check_alert_count + 1))
             else
-                log_check_item "WARN" "wp-content/debug.log existiert (${dlog_size:-${dlog_kb}KB})" "$log_target" "Fehlerprotokolle vor Updates kurz sichten."
+                log_check_item "WARN" "Debug-Log '$debug_log_path' existiert (${dlog_size:-${dlog_kb}KB})" "$log_target" "Fehlerprotokolle vor Updates kurz sichten."
                 check_warn_count=$((check_warn_count + 1))
             fi
         else
-            log_check_item "OK" "Keine wp-content/debug.log Datei vorhanden (sauber)" "$log_target"
+            log_check_item "OK" "Keine Debug-Log-Datei ('$debug_log_path') vorhanden (sauber)" "$log_target"
             check_ok_count=$((check_ok_count + 1))
         fi
 
@@ -1422,23 +1422,23 @@ function run_pre_backup_checks() {
             if [ -f "$elog" ] && [ -s "$elog" ]; then
                 local el_size
                 el_size=$(du -h "$elog" 2>/dev/null | awk '{print $1}')
-                found_error_logs+=("$(basename "$(dirname "$elog")")/$(basename "$elog") (${el_size})")
+                found_error_logs+=("'$elog' (${el_size})")
             fi
         done
         if [ "${#found_error_logs[@]}" -gt 0 ]; then
             log_check_item "WARN" "PHP error_log Datei(en) gefunden: ${found_error_logs[*]}" "$log_target" "Enthält Server- oder Script-Fehler."
             check_warn_count=$((check_warn_count + 1))
         else
-            log_check_item "OK" "Keine PHP error_log Dateien in Hauptordnern" "$log_target"
+            log_check_item "OK" "Keine PHP error_log Dateien in '$wp_root_dir' gefunden" "$log_target"
             check_ok_count=$((check_ok_count + 1))
         fi
 
         # e) Wartungsmodus (.maintenance)
         if [ -f "$wp_root_dir/.maintenance" ]; then
-            log_check_item "WARN" "Wartungsmodus (.maintenance) ist aktiv!" "$log_target" "Website zeigt aktuell 'Briefly unavailable for scheduled maintenance'."
+            log_check_item "WARN" "Wartungsmodus aktiv: '$wp_root_dir/.maintenance' ist vorhanden!" "$log_target" "Website zeigt aktuell 'Briefly unavailable for scheduled maintenance'."
             check_warn_count=$((check_warn_count + 1))
         else
-            log_check_item "OK" "Kein aktiver Wartungsmodus (.maintenance)" "$log_target"
+            log_check_item "OK" "Kein aktiver Wartungsmodus ('$wp_root_dir/.maintenance' nicht vorhanden)" "$log_target"
             check_ok_count=$((check_ok_count + 1))
         fi
 
@@ -1455,13 +1455,16 @@ function run_pre_backup_checks() {
                 local num_susp=${#susp_php_files[@]}
                 local sample_names=""
                 for sf in "${susp_php_files[@]:0:3}"; do
-                    sample_names+="$(basename "$sf"), "
+                    sample_names+="'$sf', "
                 done
                 sample_names="${sample_names%, }"
-                log_check_item "ALERT" "Verdächtige PHP-Dateien im Uploads-Ordner gefunden (${num_susp} Datei(en): ${sample_names})!" "$log_target" "Uploads sollten keine PHP-Dateien enthalten (Malware / Webshell-Gefahr!)."
+                if [ "$num_susp" -gt 3 ]; then
+                    sample_names+=" (und $((num_susp - 3)) weitere)"
+                fi
+                log_check_item "ALERT" "Verdächtige PHP-Dateien in '$uploads_dir' gefunden (${num_susp} Datei(en): ${sample_names})!" "$log_target" "Uploads sollten keine PHP-Dateien enthalten (Malware / Webshell-Gefahr!)."
                 check_alert_count=$((check_alert_count + 1))
             else
-                log_check_item "OK" "Upload-Ordner (wp-content/uploads) ist frei von verdächtigen PHP-Skripten" "$log_target"
+                log_check_item "OK" "Upload-Ordner ('$uploads_dir') ist frei von verdächtigen PHP-Skripten" "$log_target"
                 check_ok_count=$((check_ok_count + 1))
             fi
         fi
@@ -1471,25 +1474,28 @@ function run_pre_backup_checks() {
         for core_file in "$wp_config_candidate" "$wp_root_dir/index.php"; do
             if [ -f "$core_file" ]; then
                 if grep -Eiq '(eval|assert)[[:space:]]*\([[:space:]]*(base64_decode|gzinflate|gzuncompress|str_rot13|\$_POST|\$_GET|\$_COOKIE|\$_REQUEST)' "$core_file" 2>/dev/null; then
-                    log_check_item "ALERT" "Verdächtiges Verschleierungsmuster (eval/base64/assert) in '$(basename "$core_file")' gefunden!" "$log_target" "Hoher Verdacht auf Backdoor / Schadcode."
+                    log_check_item "ALERT" "Verdächtiges Verschleierungsmuster (eval/base64/assert) in '$core_file' gefunden!" "$log_target" "Hoher Verdacht auf Backdoor / Schadcode."
                     susp_code_found=1
                     check_alert_count=$((check_alert_count + 1))
                 fi
             fi
         done
         if [ "$susp_code_found" -eq 0 ]; then
-            log_check_item "OK" "Kern-Dateien (wp-config.php, index.php) zeigen keine auffälligen Verschleierungsmuster" "$log_target"
+            log_check_item "OK" "Kern-Dateien ('$wp_config_candidate', '$wp_root_dir/index.php') zeigen keine auffälligen Verschleierungsmuster" "$log_target"
             check_ok_count=$((check_ok_count + 1))
         fi
 
         # 3. Versteckte PHP-Dateien im Webroot
         local hidden_php_files=()
         while IFS= read -r hf; do
-            [ -n "$hf" ] && hidden_php_files+=("$(basename "$hf")")
+            [ -n "$hf" ] && hidden_php_files+=("'$hf'")
         done < <(find "$wp_root_dir" -maxdepth 2 -type f -name ".*.php" 2>/dev/null | head -n 5)
         if [ "${#hidden_php_files[@]}" -gt 0 ]; then
-            log_check_item "WARN" "Versteckte PHP-Dateien gefunden: ${hidden_php_files[*]}" "$log_target" "Versteckte Skripte sollten auf Legitimität geprüft werden."
+            log_check_item "WARN" "Versteckte PHP-Dateien im Webroot gefunden: ${hidden_php_files[*]}" "$log_target" "Versteckte Skripte sollten auf Legitimität geprüft werden."
             check_warn_count=$((check_warn_count + 1))
+        else
+            log_check_item "OK" "Keine versteckten PHP-Dateien (.*.php) im Webroot '$wp_root_dir' gefunden" "$log_target"
+            check_ok_count=$((check_ok_count + 1))
         fi
     fi
 
@@ -1935,7 +1941,7 @@ function backup_db() {
             return 1
         fi
 
-        echo "Datenbankdump erfolgreich erstellt." | tee -a "$log_file_name"
+        echo "Datenbankdump erfolgreich erstellt: $sql_file" | tee -a "$log_file_name"
         echo
 
         echo "Nachbearbeiten der Sicherung von $sql_file ..." | tee -a "$log_file_name"
@@ -2144,7 +2150,7 @@ function run_backup_for_project() {
                 echo 'Website-Dateien konnten nicht gesichert werden.' | tee -a "$log_file_name"
             else
                 local zip_target="$dateien_dateiname$dateiendung_zip"
-                echo "ZIP-Datei von Dateien im Website-Verzeichnis ($source_files_dir) erstellen ..." | tee -a "$log_file_name"
+                echo "ZIP-Datei von Dateien im Website-Verzeichnis ($source_files_dir) erstellen: $zip_target ..." | tee -a "$log_file_name"
                 local zip_files_status=0
                 if [ "${#source_files_dir_ignore[@]}" -gt "0" ] && [ "${source_files_dir_ignore[0]}" != "" ]
                 then
@@ -2156,7 +2162,7 @@ function run_backup_for_project() {
                     zip_files_status=$?
                 fi
                 if [ "$zip_files_status" -eq 0 ] || [ "$zip_files_status" -eq 12 ]; then
-                    echo "erledigt." | tee -a "$log_file_name"
+                    echo "erledigt: $zip_target" | tee -a "$log_file_name"
                 else
                     echo "Warnung: zip beendete mit Exit-Code $zip_files_status" | tee -a "$log_file_name" >&2
                 fi

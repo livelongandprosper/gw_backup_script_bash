@@ -26,6 +26,7 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
 ### Geändert
 - **Berechtigungen & Umask gehärtet:**
   - Standard-Umask `077` und restriktive Zugriffsrechte (`chmod 700` für Verzeichnisse, `chmod 600` für Konfigurationsdateien, temporäre SFTP-Batchdateien und Logs) sichergestellt.
+  - Bereinigung der Konfigurationsdateien: Redundante Abwärtskompatibilitäts-Variablen (`DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`) werden in neu erstellten `.env`-Dateien nicht mehr geschrieben; es wird ausschließlich die klare Multi-Datenbank-Struktur (`DB_COUNT`, `DB_1_*`, etc.) genutzt.
 - **Zuverlässigkeit bei Datenbank-Dumps & Archivierung:**
   - Explizite Exit-Code- und Nicht-Leer-Prüfung bei `mysqldump` und `zip`; fehlerhafte oder unvollständige Dump-Dateien brechen den Vorgang sofort sauber ab und werden bereinigt.
   - Standardmäßiger Export mit `--routines`, `--triggers` und `--quick` zur vollständigen Sicherung von Stored Procedures und Triggern.

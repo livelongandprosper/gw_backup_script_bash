@@ -420,7 +420,6 @@ PROJEKT_BASIS_DATEINAME='$basis_name'
 DEFAULT_SCOPE='$def_scope'
 
 # Datenbank-Konfiguration
-# Hinweis: DB_HOST/DB_NAME/DB_USER/DB_PASSWORD bleiben für Abwärtskompatibilität erhalten.
 # Bei mehreren Datenbanken wird DB_COUNT sowie DB_1_*, DB_2_*, etc. verwendet.
 DB_COUNT='$num_dbs'
 EOF
@@ -438,14 +437,6 @@ DB_${db_idx}_NAME='$n'
 DB_${db_idx}_USER='$u'
 DB_${db_idx}_PASSWORD='$esc_p'
 EOF
-        if [ "$db_idx" -eq 1 ]; then
-            cat >> "$target_file" <<EOF
-DB_HOST='$h'
-DB_NAME='$n'
-DB_USER='$u'
-DB_PASSWORD='$esc_p'
-EOF
-        fi
         db_idx=$((db_idx + 1))
     done
 

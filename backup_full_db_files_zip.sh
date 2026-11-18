@@ -164,7 +164,33 @@ function run_setup_assistant() {
             du -sh "$source_files_dir" 2>/dev/null
         fi
     fi
-    read -rp "Auszuschließende Ordner-Muster, Leerzeichen-getrennt (z.B. '*/media/*' '*/cache/*'), optional: " source_files_dir_ignore
+    echo
+    echo "--- Auszuschließende Ordner/Dateien (optional) ---"
+    echo "Jedes Muster einzeln eingeben (z.B. */cache/* oder */backups/*)."
+    echo "OHNE Anführungszeichen eintippen - jede Zeile ist ein Muster."
+    echo "Leer lassen und Enter drücken, um die Eingabe zu beenden."
+    local source_files_dir_ignore_patterns=()
+    local ignore_index=1
+    while true; do
+        read -rp "Auszuschließendes Muster $ignore_index (leer = fertig): " current_ignore_pattern
+        if [ -z "$current_ignore_pattern" ]; then
+            break
+        fi
+        source_files_dir_ignore_patterns+=("$current_ignore_pattern")
+        ignore_index=$((ignore_index + 1))
+    done
+
+    # Muster als sicher gequotetes Bash-Array-Literal aufbereiten, damit sie beim
+    # erneuten Einlesen (source) unverändert und vollständig erhalten bleiben.
+    local source_files_dir_ignore_literal=''
+    local single_ignore_pattern
+    for single_ignore_pattern in "${source_files_dir_ignore_patterns[@]}"; do
+        # jedes einzelne Anführungszeichen im Muster sicher escapen ('  ->  '\'')
+        local escaped_ignore_pattern=${single_ignore_pattern//\'/\'\\\'\'}
+        source_files_dir_ignore_literal+=" '$escaped_ignore_pattern'"
+    done
+    # führendes Leerzeichen entfernen
+    source_files_dir_ignore_literal="${source_files_dir_ignore_literal# }"
 
     echo
     echo "--- sftp-Übertragung (optional, leer lassen zum Überspringen) ---"
@@ -240,7 +266,9 @@ EOF
     cat >> "$target_env_file" <<EOF
 
 SOURCE_FILES_DIR='$source_files_dir'
-SOURCE_FILES_DIR_IGNORE='$source_files_dir_ignore'
+# Auszuschließende Muster als Bash-Array - je Element ein Muster.
+# Beispiel: SOURCE_FILES_DIR_IGNORE=('*/cache/*' '*/backups/*')
+SOURCE_FILES_DIR_IGNORE=($source_files_dir_ignore_literal)
 
 SFTP_HOST='$sftp_host'
 SFTP_PORT='$sftp_port'
@@ -794,6 +822,11 @@ function run_backup_for_project() {
     local project_name
     project_name="$(project_name_from_env_file "$project_env_file")"
 
+    # Alte Werte aus einem zuvor gesicherten Projekt entfernen, damit nichts
+    # (insbesondere die Ausschluss-Muster) fälschlich übernommen wird, wenn die
+    # aktuelle .env-Datei die Variable nicht selbst setzt.
+    unset SOURCE_FILES_DIR_IGNORE
+
     # .env laden
     # shellcheck source=/dev/null
     source "$project_env_file"
@@ -851,7 +884,31 @@ function run_backup_for_project() {
     fi
 
     source_files_dir="$SOURCE_FILES_DIR"
-    read -ra source_files_dir_ignore <<< "$SOURCE_FILES_DIR_IGNORE"
+
+    # Auszuschließende Muster laden.
+    # Bevorzugt wird das neue, robuste Bash-Array-Format
+    #   SOURCE_FILES_DIR_IGNORE=('*/cache/*' '*/backups/*')
+    # Aeltere Konfigurationen mit einem einfachen String werden weiterhin
+    # unterstuetzt und tolerant (inkl. versehentlicher Klammern/Anfuehrungszeichen)
+    # in ein Array umgewandelt.
+    source_files_dir_ignore=()
+    if declare -p SOURCE_FILES_DIR_IGNORE 2>/dev/null | grep -q '^declare -a'; then
+        source_files_dir_ignore=("${SOURCE_FILES_DIR_IGNORE[@]}")
+    elif [ -n "$SOURCE_FILES_DIR_IGNORE" ]; then
+        local raw_ignore="$SOURCE_FILES_DIR_IGNORE"
+        # versehentlich umschliessende Klammern eines kaputten alten Werts entfernen
+        raw_ignore="${raw_ignore#(}"
+        raw_ignore="${raw_ignore%)}"
+        read -ra source_files_dir_ignore <<< "$raw_ignore"
+        # evtl. je Muster verbliebene umschliessende Anfuehrungszeichen entfernen
+        local ignore_fix_i
+        for ((ignore_fix_i=0; ignore_fix_i<${#source_files_dir_ignore[@]}; ignore_fix_i++)); do
+            local ignore_pattern="${source_files_dir_ignore[$ignore_fix_i]}"
+            ignore_pattern="${ignore_pattern#\'}"; ignore_pattern="${ignore_pattern%\'}"
+            ignore_pattern="${ignore_pattern#\"}"; ignore_pattern="${ignore_pattern%\"}"
+            source_files_dir_ignore[$ignore_fix_i]="$ignore_pattern"
+        done
+    fi
 
     sftp_host="$SFTP_HOST"
     sftp_port="${SFTP_PORT:-22}"

@@ -32,6 +32,7 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
   - Plattformunabhängige und verlässliche `DEFINER`-Bereinigung (`DEFINER=CURRENT_USER`) zur Erleichterung von Server-Restores.
 - **Dateihandling & Bereinigung:**
   - Ersetzung des fehleranfälligen `ls`-Parsings bei SFTP-Übertragungen durch direktes Shell-Globbing.
+  - Vollständige Portabilität bei `sed`-Operationen (POSIX-konform ohne proprietäre `-E`-Flags) zur fehlerfreien Ausführung auf allen GNU- und BSD/macOS-Systemen.
   - Absicherung aller Löschvorgänge (`delete_if_transmitted`, `backup_live_time`) über `find -maxdepth 1` mit Pfadvalidierung und Beibehaltung von `.htaccess`-Schutzdateien.
   - Garantierter Schreib- und Löschschutz für das Website-Quellverzeichnis (`SOURCE_FILES_DIR` wird ausschließlich lesend verarbeitet).
 - **Versions- & Urheberrechtsangaben:**

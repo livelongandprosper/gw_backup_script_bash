@@ -220,11 +220,11 @@ function resolve_dir_path() {
     fi
 }
 
-# Regex-Fallback zum Auslesen von Konstanten aus wp-config.php via sed
+# Regex-Fallback zum Auslesen von Konstanten aus wp-config.php via sed (POSIX-kompatibel)
 function extract_wp_constant_sed() {
     local file="$1"
     local const_name="$2"
-    sed -n -E "s/^[[:space:]]*define\([[:space:]]*['\"]${const_name}['\"][[:space:]]*,[[:space:]]*['\"](.*)['\"][[:space:]]*\);.*/\1/p" "$file" | head -n 1
+    sed -n "s/^[[:space:]]*define([[:space:]]*['\"]${const_name}['\"][[:space:]]*,[[:space:]]*['\"]\([^'\"]*\)['\"][[:space:]]*);.*/\1/p" "$file" | head -n 1
 }
 
 # Liest Datenbank- und Website-Parameter aus einer wp-config.php aus
@@ -378,7 +378,7 @@ function suggest_project_name_from_wp() {
     raw_name="${raw_name%%:*}"
 
     local clean_name
-    clean_name=$(echo "$raw_name" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_.-]/_/g' | sed -E 's/^[._-]+|[._-]+$//g')
+    clean_name=$(echo "$raw_name" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9_.-]/_/g' -e 's/^[._-]*//' -e 's/[._-]*$//')
     echo "${clean_name:-wordpress}"
 }
 
@@ -523,7 +523,7 @@ function scan_and_setup_wordpress_sites() {
         cur_site_dir="$(dirname "$cfg")"
         parse_wp_config_file "$cfg"
         local cur_suggested_name
-        cur_suggested_name="$(suggest_project_name_from_wp "$cur_site_dir" "$WP_PARSED_HOME" "$WP_PARSED_SITEURL" "$WP_PARSED_DB_NAME" "$WP_PARSED_DB_USER" "$WP_PARSED_DB_PASSWORD" "$WP_PARSED_DB_HOST" "$WP_PARSED_PREFIX")"
+        cur_suggested_name="$(suggest_project_name_from_wp "$cur_site_dir")"
         site_dirs+=("$cur_site_dir")
         suggested_names+=("$cur_suggested_name")
         echo "  [$idx] Pfad: $cur_site_dir"
@@ -1426,7 +1426,7 @@ function backup_db() {
         echo "Nachbearbeiten der Sicherung von $sql_file ..." | tee -a "$log_file_name"
         # DEFINER bereinigen (portabel via temporärer Datei)
         local temp_sql="$sql_file.tmp.$$"
-        sed -E 's/DEFINER=(`[^`]+`|"[^"]+"|[a-zA-Z0-9_.-]+)@(`[^`]+`|"[^"]+"|[a-zA-Z0-9_.-]+)/DEFINER=CURRENT_USER/g' "$sql_file" > "$temp_sql" && mv "$temp_sql" "$sql_file"
+        sed -e 's/DEFINER=[^ *]*@[^ *]*/DEFINER=CURRENT_USER/g' "$sql_file" > "$temp_sql" && mv "$temp_sql" "$sql_file"
         rm -f "$temp_sql"
         echo "erledigt." | tee -a "$log_file_name"
         echo | tee -a "$log_file_name"

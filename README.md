@@ -2,12 +2,19 @@
 
 Free to use. Feedback is welcome: Gregor Wendland, hello@gregor-wendland.com, https://gregor-wendland.com/anfrage-an-webentwickler/
 
+Eine Übersicht aller Versionsänderungen und Neuerungen befindet sich im [CHANGELOG.md](CHANGELOG.md).
+
 ## backup_full_db_files_zip.sh ##
 - Dateien werden gezipt, Datenbankdump mit mysqldump erstellt und gezipt
     - beim packen der Dateien ist es möglich Ordner auszuschließen
 - es können beliebig viele Datenbanken gesichert werden (nicht auf eine feste Anzahl begrenzt)
 - **ein Skript für beliebig viele Projekte**: jedes Projekt (z.B. jede Website) bekommt seine
   eigene Konfigurationsdatei, es muss keine eigene Skript-Kopie pro Projekt angelegt werden
+- **automatische WordPress-Erkennung & Konfigurations-Import**:
+  - durchsucht Verzeichnisse (z.B. `..` oder Unterordner) automatisch nach WordPress-Installationen
+  - liest Datenbankzugangsdaten (DB_NAME, DB_USER, DB_PASSWORD, DB_HOST) direkt aus der `wp-config.php` aus
+  - schlägt Projektnamen / Basisdateinamen anhand von Domain (`WP_HOME`/`WP_SITEURL`) oder Ordnernamen vor
+  - richtet auf Wunsch automatisch empfohlene WordPress-Ausschlussregeln (Cache, Backups, .git) ein
 - pro Lauf frei wählbar: alle Projekte oder nur ein bestimmtes, und alles/nur Datenbank(en)/nur Dateien
 - Backup-Dateien werden in ein Projekt-Verzeichnis gespeichert
 - Speichern der Backup-Dateien via sftp oder rsync möglich
@@ -52,9 +59,10 @@ BackupScript - Hauptmenü
   1) Ein Projekt sichern
   2) Alle Projekte sichern
   3) Neues Projekt einrichten
-  4) Datenbank wiederherstellen
-  5) Projekt-Datengröße anzeigen
-  6) Projektübersicht anzeigen
+  4) WordPress-Installationen suchen & einrichten
+  5) Datenbank wiederherstellen
+  6) Projekt-Datengröße anzeigen
+  7) Projektübersicht anzeigen
   0) Beenden
 ======================================
 ```
@@ -65,8 +73,12 @@ BackupScript - Hauptmenü
 - **Alle Projekte sichern**: sichert nacheinander alle konfigurierten Projekte; fragt
   vorher ebenfalls nach dem gewünschten Umfang (Standard/nur Datenbank(en)/nur
   Dateien/alles), der dann für alle Projekte verwendet wird.
-- **Neues Projekt einrichten**: fragt einen Projektnamen ab und startet direkt den
-  Setup-Assistenten für dieses neue Projekt (inkl. anschließendem ersten Backup).
+- **Neues Projekt einrichten**: startet den Setup-Assistenten für ein neues Projekt (erkennt
+  einen angegebenen WordPress-Ordner automatisch und übernimmt dessen Zugangsdaten).
+- **WordPress-Installationen suchen & einrichten**: scannt ein übergeordnetes oder
+  angegebenes Verzeichnis nach allen vorhandenen `wp-config.php`-Dateien, extrahiert
+  die Datenbank-Zugangsdaten, schlägt Projektnamen/Domains vor und legt die `.env`-Dateien
+  im Batch oder einzeln an.
 - **Datenbank wiederherstellen**: entspricht `--restore` (siehe unten).
 - **Projekt-Datengröße anzeigen**: zeigt die Größe des Website-Ordners sowie der
   bisherigen Backups eines Projekts an (`du -sh`).
@@ -75,9 +87,23 @@ BackupScript - Hauptmenü
 
 Das Menü wird nur angezeigt, wenn das Skript interaktiv (in einem Terminal) und
 komplett ohne Parameter aufgerufen wird. Sobald ein Parameter übergeben wird
-(z.B. `--project=`, `--scope=` oder `--restore`), wird das Menü übersprungen und
+(z.B. `--project=`, `--scope=`, `--restore` oder `--scan-wp`), wird das Menü übersprungen und
 direkt wie angegeben verfahren – dadurch bleiben bestehende Cronjobs unverändert
 lauffähig.
+
+### Automatische WordPress-Erkennung (`--scan-wp`) ###
+Das Skript kann selbstständig WordPress-Installationen suchen und vollständig einrichten:
+
+```
+./backup_full_db_files_zip.sh --scan-wp              # sucht im übergeordneten Ordner (..)
+./backup_full_db_files_zip.sh --scan-wp=/var/www     # sucht in einem spezifischen Ordner
+```
+
+- **Pfad-Erkennung:** Unterstützt relative Pfadangaben (z.B. `..`, `.`, `../sites`) relativ zum Skript-Verzeichnis sowie absolute Pfade.
+- **Automatisches Auslesen:** `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST` und Tabellen-Präfixe werden direkt und sicher aus `wp-config.php` ausgelesen.
+- **Intelligente Vorschläge:** Aus `WP_HOME`, `WP_SITEURL` oder dem Ordnernamen wird automatisch ein passender Projektname vorgeschlagen.
+- **Ausschlussmuster:** Typische WordPress-Cache- und Backup-Verzeichnisse (`*/wp-content/cache/*`, `*/wp-content/uploads/cache/*`, `*/wp-content/updraft/*`, etc.) werden auf Wunsch direkt als Ausschluss hinterlegt.
+- **Manuelle Ergänzung:** Sollten Zugangsdaten fehlen oder abweichen, können alle Werte während des Assistenten bestätigt, angepasst oder manuell eingegeben werden.
 
 ### Projekt- und Umfang-Auswahl beim Backup ###
 Für nicht-interaktive Aufrufe (z.B. per Cronjob) stehen zwei Parameter zur
@@ -85,6 +111,7 @@ Verfügung, die auch weiterhin ohne Menü direkt funktionieren:
 
 ```
 ./backup_full_db_files_zip.sh                          # interaktiv: zeigt das Hauptmenü
+./backup_full_db_files_zip.sh --scan-wp                # WordPress-Installationen scannen & importieren
 ./backup_full_db_files_zip.sh --project=kundeA          # nur Projekt "kundeA"
 ./backup_full_db_files_zip.sh --project=alle            # alle Projekte
 ./backup_full_db_files_zip.sh --project=alle --scope=db # bei allen Projekten nur die Datenbank(en)

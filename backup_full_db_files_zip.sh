@@ -7,17 +7,20 @@ before=$(date +%s)
 
 ###
 # BackupScript zum Backup von Websites
+# Version: 2.0.0
+#
 # - Dateien einer Website
-# - - optional können Dateien ausgeschlossen werden (files_dir_ignore)
-# - Datenbank einer Website
-# - Backup dateien können an entfernten Server via sftp oder rsync übertragen werden
+# - - optional können Dateien ausgeschlossen werden (SOURCE_FILES_DIR_IGNORE)
+# - Datenbank(en) einer Website
+# - Automatische WordPress-Erkennung & wp-config-Import
+# - Backup-Dateien können an entfernten Server via sftp oder rsync übertragen werden
 #
 # Dieses eine Skript kann für beliebig viele Projekte im selben Ordner verwendet werden.
 # Jedes Projekt bekommt seine eigene Konfigurationsdatei nach dem Muster .env.<projektname>
 # (z.B. .env.kundeA, .env.kundeB, ...). Eine alte einzelne .env-Datei (ohne Projektnamen)
 # wird weiterhin als "default"-Projekt unterstützt.
 #
-# (c) Gregor Wendland 2017-2025 /// free to use, free to change, do what you want with this file, no warranty
+# (c) Gregor Wendland 2017-2026 /// free to use, free to change, do what you want with this file, no warranty
 ###
 #
 # Wieder-einspielen der Datenbank:
@@ -53,6 +56,8 @@ before=$(date +%s)
 cli_project=''
 cli_scope=''
 restore_mode='false'
+cli_scan_wp='false'
+cli_scan_wp_path=''
 
 for cli_arg in "$@"; do
     case "$cli_arg" in
@@ -65,11 +70,28 @@ for cli_arg in "$@"; do
         --restore)
             restore_mode='true'
             ;;
+        --scan-wp)
+            cli_scan_wp='true'
+            cli_scan_wp_path='..'
+            ;;
+        --scan-wp=*)
+            cli_scan_wp='true'
+            cli_scan_wp_path="${cli_arg#*=}"
+            ;;
+        --discover-wp)
+            cli_scan_wp='true'
+            cli_scan_wp_path='..'
+            ;;
+        --discover-wp=*)
+            cli_scan_wp='true'
+            cli_scan_wp_path="${cli_arg#*=}"
+            ;;
         --help|-h)
-            echo "Verwendung: $0 [--project=<name>|alle] [--scope=alles|db|dateien] [--restore]"
+            echo "Verwendung: $0 [--project=<name>|alle] [--scope=alles|db|dateien] [--restore] [--scan-wp[=<ordner>]]"
             echo "  --project   Projekt-Konfiguration (.env.<name>), die verwendet werden soll. 'alle' verarbeitet alle gefundenen Projekte."
             echo "  --scope     Was gesichert werden soll: alles (Standard), db (nur Datenbank(en)) oder dateien (nur Website-Dateien)."
             echo "  --restore   Datenbank aus einem vorhandenen Backup wiederherstellen (interaktiv), statt ein Backup zu erstellen."
+            echo "  --scan-wp   Sucht nach WordPress-Installationen in <ordner> (Standard: ..) und richtet diese interaktiv ein."
             echo "Ohne Parameter wird im Terminal das interaktive Hauptmenü angezeigt."
             exit 0
             ;;
@@ -171,6 +193,462 @@ fi
 ################################
 ################################
 ################################
+## Hilfsfunktionen für Pfad-Auflösung, WordPress-Erkennung & wp-config-Parsing
+
+# Löst relative Pfade (relativ zu $basename) oder absolute Pfade inklusive ~ auf
+function resolve_dir_path() {
+    local input_path="$1"
+    local base_ref="${2:-$basename}"
+    [ -z "$input_path" ] && echo "" && return 1
+
+    if [[ "$input_path" == ~* ]]; then
+        input_path="${input_path/#\~/$HOME}"
+    fi
+
+    if [[ "$input_path" = /* ]]; then
+        if [ -d "$input_path" ]; then
+            (cd "$input_path" 2>/dev/null && pwd)
+        else
+            echo "$input_path"
+        fi
+    else
+        if [ -d "$base_ref/$input_path" ]; then
+            (cd "$base_ref/$input_path" 2>/dev/null && pwd)
+        else
+            echo "$base_ref/$input_path"
+        fi
+    fi
+}
+
+# Regex-Fallback zum Auslesen von Konstanten aus wp-config.php via sed
+function extract_wp_constant_sed() {
+    local file="$1"
+    local const_name="$2"
+    sed -n -E "s/^[[:space:]]*define\([[:space:]]*['\"]${const_name}['\"][[:space:]]*,[[:space:]]*['\"](.*)['\"][[:space:]]*\);.*/\1/p" "$file" | head -n 1
+}
+
+# Liest Datenbank- und Website-Parameter aus einer wp-config.php aus
+function parse_wp_config_file() {
+    local wp_config_file="$1"
+    [ -f "$wp_config_file" ] || return 1
+
+    WP_PARSED_DB_NAME=""
+    WP_PARSED_DB_USER=""
+    WP_PARSED_DB_PASSWORD=""
+    WP_PARSED_DB_HOST="localhost"
+    WP_PARSED_SITEURL=""
+    WP_PARSED_HOME=""
+    WP_PARSED_PREFIX="wp_"
+
+    # Bevorzugt: PHP Token-Parsing (für 100% PHP-Syntax- und String-Kompatibilität)
+    if command -v php >/dev/null 2>&1; then
+        local parsed_output
+        parsed_output=$(php -r '
+        $file = $argv[1];
+        $content = @file_get_contents($file);
+        if ($content === false) exit(1);
+        $tokens = @token_get_all($content);
+        $count = count($tokens);
+        $data = [
+            "DB_NAME" => "",
+            "DB_USER" => "",
+            "DB_PASSWORD" => "",
+            "DB_HOST" => "localhost",
+            "WP_SITEURL" => "",
+            "WP_HOME" => "",
+            "table_prefix" => "wp_"
+        ];
+        for ($i = 0; $i < $count; $i++) {
+            if (is_array($tokens[$i])) {
+                if ($tokens[$i][0] === T_STRING && strtolower($tokens[$i][1]) === "define") {
+                    $name = null;
+                    $val = null;
+                    $j = $i + 1;
+                    while ($j < $count && $tokens[$j] !== ";") {
+                        if (is_array($tokens[$j]) && $tokens[$j][0] === T_CONSTANT_ENCAPSED_STRING) {
+                            $raw = $tokens[$j][1];
+                            $quote = $raw[0];
+                            $inner = substr($raw, 1, -1);
+                            if ($quote === "\x27") {
+                                $unescaped = str_replace(["\\\\", "\\\x27"], ["\\", "\x27"], $inner);
+                            } else {
+                                $unescaped = stripcslashes($inner);
+                            }
+                            if ($name === null) {
+                                $name = $unescaped;
+                            } else if ($val === null) {
+                                $val = $unescaped;
+                                break;
+                            }
+                        }
+                        $j++;
+                    }
+                    if ($name !== null && $val !== null && array_key_exists($name, $data)) {
+                        $data[$name] = $val;
+                    }
+                } elseif ($tokens[$i][0] === T_VARIABLE && $tokens[$i][1] === "\$table_prefix") {
+                    $j = $i + 1;
+                    while ($j < $count && $tokens[$j] !== ";") {
+                        if (is_array($tokens[$j]) && $tokens[$j][0] === T_CONSTANT_ENCAPSED_STRING) {
+                            $raw = $tokens[$j][1];
+                            $quote = $raw[0];
+                            $inner = substr($raw, 1, -1);
+                            if ($quote === "\x27") {
+                                $data["table_prefix"] = str_replace(["\\\\", "\\\x27"], ["\\", "\x27"], $inner);
+                            } else {
+                                $data["table_prefix"] = stripcslashes($inner);
+                            }
+                            break;
+                        }
+                        $j++;
+                    }
+                }
+            }
+        }
+        foreach ($data as $k => $v) {
+            echo $k . "\t" . $v . "\n";
+        }
+        ' "$wp_config_file" 2>/dev/null)
+
+        if [ -n "$parsed_output" ]; then
+            while IFS=$'\t' read -r k v; do
+                case "$k" in
+                    DB_NAME) WP_PARSED_DB_NAME="$v" ;;
+                    DB_USER) WP_PARSED_DB_USER="$v" ;;
+                    DB_PASSWORD) WP_PARSED_DB_PASSWORD="$v" ;;
+                    DB_HOST) WP_PARSED_DB_HOST="${v:-localhost}" ;;
+                    WP_SITEURL) WP_PARSED_SITEURL="$v" ;;
+                    WP_HOME) WP_PARSED_HOME="$v" ;;
+                    table_prefix) WP_PARSED_PREFIX="${v:-wp_}" ;;
+                esac
+            done <<< "$parsed_output"
+            return 0
+        fi
+    fi
+
+    # Fallback: sed / regex
+    WP_PARSED_DB_NAME="$(extract_wp_constant_sed "$wp_config_file" DB_NAME)"
+    WP_PARSED_DB_USER="$(extract_wp_constant_sed "$wp_config_file" DB_USER)"
+    WP_PARSED_DB_PASSWORD="$(extract_wp_constant_sed "$wp_config_file" DB_PASSWORD)"
+    WP_PARSED_DB_HOST="$(extract_wp_constant_sed "$wp_config_file" DB_HOST)"
+    WP_PARSED_DB_HOST="${WP_PARSED_DB_HOST:-localhost}"
+    WP_PARSED_SITEURL="$(extract_wp_constant_sed "$wp_config_file" WP_SITEURL)"
+    WP_PARSED_HOME="$(extract_wp_constant_sed "$wp_config_file" WP_HOME)"
+}
+
+# Erstellt einen sauberen Namensvorschlag für das Projekt anhand URL / Blogname / Ordnername
+function suggest_project_name_from_wp() {
+    local wp_dir="$1"
+    local site_url="${2:-$WP_PARSED_HOME}"
+    site_url="${site_url:-$WP_PARSED_SITEURL}"
+    local db_name="${3:-$WP_PARSED_DB_NAME}"
+    local db_user="${4:-$WP_PARSED_DB_USER}"
+    local db_pass="${5:-$WP_PARSED_DB_PASSWORD}"
+    local db_host="${6:-$WP_PARSED_DB_HOST}"
+    local prefix="${7:-$WP_PARSED_PREFIX}"
+
+    local raw_name=""
+
+    # Optional: MySQL-Schnellabfrage für SiteURL / Blogname, falls Client installiert und erreichbar
+    if [ -z "$site_url" ] && [ -n "$db_name" ] && [ -n "$db_user" ] && command -v mysql >/dev/null 2>&1; then
+        local db_host_clean="${db_host%%:*}"
+        local db_port="${db_host#*:}"
+        local port_arg=""
+        [ "$db_port" != "$db_host" ] && port_arg="-P$db_port"
+        local query_res
+        query_res=$(MYSQL_PWD="$db_pass" mysql -h"$db_host_clean" $port_arg -u"$db_user" "$db_name" --connect-timeout=2 -s -N -e "SELECT option_value FROM ${prefix}options WHERE option_name IN ('blogname', 'siteurl') ORDER BY option_name DESC LIMIT 2;" 2>/dev/null)
+        if [ -n "$query_res" ]; then
+            raw_name=$(echo "$query_res" | head -n 1)
+        fi
+    fi
+
+    if [ -z "$raw_name" ] && [ -n "$site_url" ]; then
+        raw_name="$site_url"
+    fi
+
+    if [ -z "$raw_name" ]; then
+        raw_name="$(basename "$wp_dir")"
+    fi
+
+    # Bereinigung: Schema, www, Pfade und Sonderzeichen entfernen
+    raw_name="${raw_name#http://}"
+    raw_name="${raw_name#https://}"
+    raw_name="${raw_name#www.}"
+    raw_name="${raw_name%%/*}"
+    raw_name="${raw_name%%:*}"
+
+    local clean_name
+    clean_name=$(echo "$raw_name" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_.-]/_/g' | sed -E 's/^[._-]+|[._-]+$//g')
+    echo "${clean_name:-wordpress}"
+}
+
+# Schreibt eine vollständige .env.<projektname> Konfigurationsdatei mit Umask 077 und chmod 600
+function write_project_env_file() {
+    local target_file="$1"
+    local proj_name="$2"
+    local basis_name="$3"
+    local def_scope="$4"
+    local src_dir="$5"
+    local ignore_literal="$6"
+    local b_live_time="$7"
+    local del_transmitted="$8"
+    local s_host="$9"
+    local s_port="${10}"
+    local s_user="${11}"
+    local s_key="${12}"
+    local s_dir="${13}"
+    local s_ssh_bin="${14}"
+    local r_host="${15}"
+    local r_user="${16}"
+    local r_dir="${17}"
+    local r_key="${18}"
+    shift 18
+    local dbs=("$@")
+
+    local count=${#dbs[@]}
+    local num_dbs=$((count / 4))
+
+    cat > "$target_file" <<EOF
+# Zugangsdaten & Konfiguration für Projekt '$proj_name'
+# automatisch erstellt am $(date) durch das Backup-Skript
+# Diese Datei enthält Zugangsdaten und sollte NICHT ins Git-Repository eingecheckt werden (siehe .gitignore).
+
+PROJECT_NAME='$proj_name'
+PROJEKT_BASIS_DATEINAME='$basis_name'
+
+# Was soll standardmäßig gesichert werden, wenn nicht per --scope angegeben: alles / db / dateien
+DEFAULT_SCOPE='$def_scope'
+
+# Datenbank-Konfiguration
+# Hinweis: DB_HOST/DB_NAME/DB_USER/DB_PASSWORD bleiben für Abwärtskompatibilität erhalten.
+# Bei mehreren Datenbanken wird DB_COUNT sowie DB_1_*, DB_2_*, etc. verwendet.
+DB_COUNT='$num_dbs'
+EOF
+
+    local db_idx=1
+    for ((i=0; i<count; i+=4)); do
+        local h="${dbs[i]}"
+        local n="${dbs[i+1]}"
+        local u="${dbs[i+2]}"
+        local p="${dbs[i+3]}"
+        local esc_p=${p//\'/\'\\\'\'}
+        cat >> "$target_file" <<EOF
+DB_${db_idx}_HOST='$h'
+DB_${db_idx}_NAME='$n'
+DB_${db_idx}_USER='$u'
+DB_${db_idx}_PASSWORD='$esc_p'
+EOF
+        if [ "$db_idx" -eq 1 ]; then
+            cat >> "$target_file" <<EOF
+DB_HOST='$h'
+DB_NAME='$n'
+DB_USER='$u'
+DB_PASSWORD='$esc_p'
+EOF
+        fi
+        db_idx=$((db_idx + 1))
+    done
+
+    cat >> "$target_file" <<EOF
+
+SOURCE_FILES_DIR='$src_dir'
+# Auszuschließende Muster als Bash-Array - je Element ein Muster.
+# Beispiel: SOURCE_FILES_DIR_IGNORE=('*/cache/*' '*/backups/*')
+SOURCE_FILES_DIR_IGNORE=($ignore_literal)
+
+SFTP_HOST='$s_host'
+SFTP_PORT='$s_port'
+SFTP_KEY='$s_key'
+SFTP_USER='$s_user'
+SFTP_DIRECTORY='$s_dir'
+SFTP_PATH_TO_SSH_BINARY='${s_ssh_bin:-/usr/bin/ssh}'
+
+RSYNC_HOST='$r_host'
+RSYNC_USER='$r_user'
+RSYNC_DIRECTORY='$r_dir'
+RSYNC_KEY='$r_key'
+
+BACKUP_LIVE_TIME='$b_live_time'
+DELETE_IF_TRANSMITTED='$del_transmitted'
+
+# E-Mail-Benachrichtigung (aktuell noch nicht implementiert)
+STATUS_EMAIL_ADDRESS=''
+ALERT_EMAIL_ADDRESS=''
+EOF
+    chmod 600 "$target_file" 2>/dev/null || true
+}
+
+# Sucht in einem angegebenen Verzeichnis nach WordPress-Installationen und richtet diese ein
+function scan_and_setup_wordpress_sites() {
+    local default_scan_dir="${1:-..}"
+    echo
+    echo "======================================"
+    echo "WordPress-Erkennung & Auto-Import"
+    echo "======================================"
+    echo "Das Skript sucht in einem Ordner nach vorhandenen WordPress-Installationen,"
+    echo "liest Datenbank-Zugangsdaten aus der wp-config.php aus und schlägt"
+    echo "Projekt-Namen und Dateipfade automatisch vor."
+    echo
+
+    read -rp "Suchordner für WordPress-Installationen (relativ oder absolut) [$default_scan_dir]: " input_scan_dir
+    input_scan_dir=${input_scan_dir:-$default_scan_dir}
+
+    local resolved_scan_dir
+    resolved_scan_dir="$(resolve_dir_path "$input_scan_dir")"
+
+    if [ -z "$resolved_scan_dir" ] || [ ! -d "$resolved_scan_dir" ]; then
+        echo "Fehler: Ordner '$input_scan_dir' existiert nicht oder ist kein Verzeichnis." >&2
+        return 1
+    fi
+
+    echo "Durchsuche '$resolved_scan_dir' nach WordPress-Installationen (wp-config.php) ..."
+    local found_configs=()
+    while IFS= read -r -d '' cfg; do
+        found_configs+=("$cfg")
+    done < <(find "$resolved_scan_dir" -maxdepth 4 -name "wp-config.php" ! -path "*/node_modules/*" ! -path "*/vendor/*" ! -path "*/.*/*" ! -path "*/log/*" -print0 2>/dev/null)
+
+    if [ "${#found_configs[@]}" -eq 0 ]; then
+        echo "Keine WordPress-Installationen in '$resolved_scan_dir' gefunden."
+        return 1
+    fi
+
+    echo
+    echo "Es wurden ${#found_configs[@]} WordPress-Installation(en) gefunden:"
+    echo "--------------------------------------------------"
+    local site_dirs=()
+    local suggested_names=()
+    local idx=1
+    for cfg in "${found_configs[@]}"; do
+        local cur_site_dir
+        cur_site_dir="$(dirname "$cfg")"
+        parse_wp_config_file "$cfg"
+        local cur_suggested_name
+        cur_suggested_name="$(suggest_project_name_from_wp "$cur_site_dir" "$WP_PARSED_HOME" "$WP_PARSED_SITEURL" "$WP_PARSED_DB_NAME" "$WP_PARSED_DB_USER" "$WP_PARSED_DB_PASSWORD" "$WP_PARSED_DB_HOST" "$WP_PARSED_PREFIX")"
+        site_dirs+=("$cur_site_dir")
+        suggested_names+=("$cur_suggested_name")
+        echo "  [$idx] Pfad: $cur_site_dir"
+        echo "      Projektname-Vorschlag: '$cur_suggested_name' | DB: '${WP_PARSED_DB_NAME:-keine}' (${WP_PARSED_DB_HOST:-localhost})"
+        idx=$((idx + 1))
+    done
+    echo "--------------------------------------------------"
+
+    read -rp "Welche Installationen sollen eingerichtet werden? (z.B. 'alle', '1,2' oder '1-3') [alle]: " selection_input
+    selection_input=${selection_input:-alle}
+
+    local selected_indices=()
+    if [[ "$selection_input" =~ ^(alle|all|a)$ ]]; then
+        for ((i=1; i<=${#found_configs[@]}; i++)); do
+            selected_indices+=("$i")
+        done
+    else
+        local clean_selection="${selection_input//,/ }"
+        for part in $clean_selection; do
+            if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                local start="${BASH_REMATCH[1]}"
+                local end="${BASH_REMATCH[2]}"
+                for ((k=start; k<=end; k++)); do
+                    if [ "$k" -ge 1 ] && [ "$k" -le "${#found_configs[@]}" ]; then
+                        selected_indices+=("$k")
+                    fi
+                done
+            elif [[ "$part" =~ ^[0-9]+$ ]]; then
+                if [ "$part" -ge 1 ] && [ "$part" -le "${#found_configs[@]}" ]; then
+                    selected_indices+=("$part")
+                fi
+            fi
+        done
+    fi
+
+    if [ "${#selected_indices[@]}" -eq 0 ]; then
+        echo "Keine gültige Auswahl getroffen."
+        return 1
+    fi
+
+    local created_count=0
+    for sel_idx in "${selected_indices[@]}"; do
+        local arr_idx=$((sel_idx - 1))
+        local cur_cfg="${found_configs[$arr_idx]}"
+        local cur_site_dir="${site_dirs[$arr_idx]}"
+        local cur_suggested_name="${suggested_names[$arr_idx]}"
+
+        parse_wp_config_file "$cur_cfg"
+
+        echo
+        echo "======================================"
+        echo "Einrichtung für [$sel_idx]: $cur_site_dir"
+        echo "======================================"
+
+        read -rp "Projektname (für .env.<name>) [$cur_suggested_name]: " input_project_name
+        local project_name="${input_project_name:-$cur_suggested_name}"
+        project_name="${project_name// /_}"
+
+        read -rp "Projekt-Basisdateiname für Backups [$project_name]: " input_basis_name
+        local basis_name="${input_basis_name:-$project_name}"
+
+        # DB-Parameter aus WP-Config
+        local wp_db_host="${WP_PARSED_DB_HOST:-localhost}"
+        local wp_db_name="${WP_PARSED_DB_NAME}"
+        local wp_db_user="${WP_PARSED_DB_USER}"
+        local wp_db_pass="${WP_PARSED_DB_PASSWORD}"
+
+        echo
+        echo "--- Datenbankzugangsdaten (aus wp-config.php) ---"
+        read -rp "DB 1 Host [$wp_db_host]: " input_db_host
+        local db_host="${input_db_host:-$wp_db_host}"
+
+        read -rp "DB 1 Name [$wp_db_name]: " input_db_name
+        local db_name="${input_db_name:-$wp_db_name}"
+
+        read -rp "DB 1 User [$wp_db_user]: " input_db_user
+        local db_user="${input_db_user:-$wp_db_user}"
+
+        local db_pass=""
+        if [ -n "$wp_db_pass" ]; then
+            read -rsp "DB 1 Passwort [Enter = aus wp-config.php übernehmen]: " input_db_pass
+            echo
+            db_pass="${input_db_pass:-$wp_db_pass}"
+        else
+            read -rsp "DB 1 Passwort: " db_pass
+            echo
+        fi
+
+        echo
+        read -rp "Website-Ordner, der gesichert werden soll [$cur_site_dir]: " input_source_files_dir
+        local source_files_dir="${input_source_files_dir:-$cur_site_dir}"
+
+        echo
+        read -rp "Standard-Ausschlussmuster für WordPress (Cache & Backups) verwenden? (J/n) [J]: " wp_ignore_choice
+        wp_ignore_choice=${wp_ignore_choice:-J}
+        local source_files_dir_ignore_literal=""
+        if [[ "$wp_ignore_choice" =~ ^[jJyY]$ ]]; then
+            source_files_dir_ignore_literal="'*/wp-content/cache/*' '*/wp-content/uploads/cache/*' '*/wp-content/updraft/*' '*/wp-content/backups/*' '*/wp-content/ai1wm-backups/*' '*/.git/*'"
+            echo " -> Ausschlüsse gesetzt: Cache, Uploads-Cache, Updraft/Ai1wm-Backups, .git"
+        fi
+
+        echo
+        read -rp "Standard-Umfang - alles/db/dateien [alles]: " default_scope
+        default_scope=${default_scope:-alles}
+
+        read -rp "Backup-Lebenszeit in Tagen (0 = unendlich) [0]: " backup_live_time
+        backup_live_time=${backup_live_time:-0}
+
+        local target_env_file="$basename/.env.$project_name"
+        write_project_env_file "$target_env_file" "$project_name" "$basis_name" "$default_scope" "$source_files_dir" "$source_files_dir_ignore_literal" "$backup_live_time" "false" "" "" "" "" "" "/usr/bin/ssh" "" "" "" "" "$db_host" "$db_name" "$db_user" "$db_pass"
+
+        echo "-> Projekt '$project_name' erfolgreich als $target_env_file gespeichert."
+        created_count=$((created_count + 1))
+    done
+
+    echo
+    echo "======================================"
+    echo "$created_count Projekt-Konfiguration(en) erfolgreich angelegt."
+    echo "======================================"
+    return 0
+}
+
+################################
+################################
+################################
 ## Setup-Assistent - fragt Zugangsdaten für ein (neues) Projekt ab und legt .env.<projektname> an
 #  parameter1: Projektname (wird für den Dateinamen der .env-Datei verwendet)
 function run_setup_assistant() {
@@ -188,34 +666,125 @@ function run_setup_assistant() {
     local projekt_basis_dateiname=${input_projekt_basis_dateiname:-$project_name}
 
     echo
-    echo "--- Datenbanken (beliebig viele, Nur-Lesezugriff-Benutzer empfohlen) ---"
-    echo "Datenbanknamen einfach leer lassen, um keine (weitere) Datenbank hinzuzufügen."
+    read -rp "Website-Ordner des Projekts (relativ oder absolut, z.B. '../$project_name') [leer = überspringen]: " input_source_files_dir
+    local source_files_dir=""
+    local source_files_dir_ignore_patterns=()
+
     local db_hosts=()
     local db_names=()
     local db_users=()
     local db_passwords=()
-    local db_index=1
-    while true; do
-        echo
-        read -rp "DB $db_index Name (leer = fertig): " current_db_name
-        if [ "$current_db_name" == "" ]; then
-            break
-        fi
-        read -rp "DB $db_index Host [localhost]: " current_db_host
-        current_db_host=${current_db_host:-localhost}
-        read -rp "DB $db_index User: " current_db_user
-        read -rsp "DB $db_index Passwort: " current_db_password
-        echo
-        db_names+=("$current_db_name")
-        db_hosts+=("$current_db_host")
-        db_users+=("$current_db_user")
-        db_passwords+=("$current_db_password")
-        db_index=$((db_index + 1))
-    done
-    local db_count=${#db_names[@]}
 
-    echo
-    read -rp "Website-Ordner, der gesichert werden soll (absoluter Pfad): " source_files_dir
+    if [ -n "$input_source_files_dir" ]; then
+        source_files_dir="$(resolve_dir_path "$input_source_files_dir")"
+        if [ -d "$source_files_dir" ]; then
+            # Suche nach wp-config.php im Ordner oder gängigen Unterordnern
+            local found_wp_config=""
+            for wp_candidate in "$source_files_dir/wp-config.php" "$source_files_dir/public_html/wp-config.php" "$source_files_dir/htdocs/wp-config.php" "$source_files_dir/wordpress/wp-config.php" "$source_files_dir/wp/wp-config.php" "$(dirname "$source_files_dir")/wp-config.php"; do
+                if [ -f "$wp_candidate" ]; then
+                    found_wp_config="$wp_candidate"
+                    break
+                fi
+            done
+
+            if [ -n "$found_wp_config" ]; then
+                echo
+                echo "WordPress-Konfiguration (wp-config.php) in '$found_wp_config' erkannt!"
+                parse_wp_config_file "$found_wp_config"
+                echo "Ausgelesene Datenbank: Name='${WP_PARSED_DB_NAME:-keine}', Host='${WP_PARSED_DB_HOST:-localhost}', User='${WP_PARSED_DB_USER:-keiner}'"
+
+                if [ -n "$WP_PARSED_DB_NAME" ]; then
+                    read -rp "Ausgelesene WordPress-Datenbankzugangsdaten übernehmen? (J/n) [J]: " use_wp_db
+                    use_wp_db=${use_wp_db:-J}
+                    if [[ "$use_wp_db" =~ ^[jJyY]$ ]]; then
+                        read -rp "DB 1 Host [${WP_PARSED_DB_HOST:-localhost}]: " current_db_host
+                        current_db_host=${current_db_host:-${WP_PARSED_DB_HOST:-localhost}}
+
+                        read -rp "DB 1 Name [${WP_PARSED_DB_NAME}]: " current_db_name
+                        current_db_name=${current_db_name:-${WP_PARSED_DB_NAME}}
+
+                        read -rp "DB 1 User [${WP_PARSED_DB_USER}]: " current_db_user
+                        current_db_user=${current_db_user:-${WP_PARSED_DB_USER}}
+
+                        local current_db_password=""
+                        if [ -n "$WP_PARSED_DB_PASSWORD" ]; then
+                            read -rsp "DB 1 Passwort [Enter = aus wp-config.php übernehmen]: " input_wp_db_password
+                            echo
+                            current_db_password=${input_wp_db_password:-$WP_PARSED_DB_PASSWORD}
+                        else
+                            read -rsp "DB 1 Passwort: " current_db_password
+                            echo
+                        fi
+
+                        db_names+=("$current_db_name")
+                        db_hosts+=("$current_db_host")
+                        db_users+=("$current_db_user")
+                        db_passwords+=("$current_db_password")
+
+                        read -rp "Standard-Ausschlussmuster für WordPress (Cache & Backups) anwenden? (J/n) [J]: " wp_ignore_choice
+                        wp_ignore_choice=${wp_ignore_choice:-J}
+                        if [[ "$wp_ignore_choice" =~ ^[jJyY]$ ]]; then
+                            source_files_dir_ignore_patterns=('*/wp-content/cache/*' '*/wp-content/uploads/cache/*' '*/wp-content/updraft/*' '*/wp-content/backups/*' '*/wp-content/ai1wm-backups/*' '*/.git/*')
+                        fi
+                    fi
+                fi
+            fi
+        fi
+    fi
+
+    # Wenn keine DBs vorhanden (oder manuell mehr hinzufügen)
+    if [ "${#db_names[@]}" -eq 0 ]; then
+        echo
+        echo "--- Datenbanken (beliebig viele, Nur-Lesezugriff-Benutzer empfohlen) ---"
+        echo "Datenbanknamen einfach leer lassen, um keine (weitere) Datenbank hinzuzufügen."
+        local db_index=1
+        while true; do
+            echo
+            read -rp "DB $db_index Name (leer = fertig): " current_db_name
+            if [ "$current_db_name" == "" ]; then
+                break
+            fi
+            read -rp "DB $db_index Host [localhost]: " current_db_host
+            current_db_host=${current_db_host:-localhost}
+            read -rp "DB $db_index User: " current_db_user
+            read -rsp "DB $db_index Passwort: " current_db_password
+            echo
+            db_names+=("$current_db_name")
+            db_hosts+=("$current_db_host")
+            db_users+=("$current_db_user")
+            db_passwords+=("$current_db_password")
+            db_index=$((db_index + 1))
+        done
+    else
+        read -rp "Weitere Datenbank hinzufügen? (j/N) [N]: " add_more_db
+        if [[ "$add_more_db" =~ ^[jJyY]$ ]]; then
+            local db_index=$((${#db_names[@]} + 1))
+            while true; do
+                echo
+                read -rp "DB $db_index Name (leer = fertig): " current_db_name
+                if [ "$current_db_name" == "" ]; then
+                    break
+                fi
+                read -rp "DB $db_index Host [localhost]: " current_db_host
+                current_db_host=${current_db_host:-localhost}
+                read -rp "DB $db_index User: " current_db_user
+                read -rsp "DB $db_index Passwort: " current_db_password
+                echo
+                db_names+=("$current_db_name")
+                db_hosts+=("$current_db_host")
+                db_users+=("$current_db_user")
+                db_passwords+=("$current_db_password")
+                db_index=$((db_index + 1))
+            done
+        fi
+    fi
+
+    if [ -z "$source_files_dir" ]; then
+        echo
+        read -rp "Website-Ordner, der gesichert werden soll (relativ oder absolut): " input_source_files_dir
+        source_files_dir="$(resolve_dir_path "$input_source_files_dir")"
+    fi
+
     if [ -n "$source_files_dir" ] && [ -d "$source_files_dir" ]; then
         read -rp "Größe dieses Ordners anzeigen? Kann bei großen Ordnern etwas dauern (j/N): " show_folder_size
         if [[ "$show_folder_size" =~ ^[jJyY]$ ]]; then
@@ -223,32 +792,31 @@ function run_setup_assistant() {
             du -sh "$source_files_dir" 2>/dev/null
         fi
     fi
-    echo
-    echo "--- Auszuschließende Ordner/Dateien (optional) ---"
-    echo "Jedes Muster einzeln eingeben (z.B. */cache/* oder */backups/*)."
-    echo "OHNE Anführungszeichen eintippen - jede Zeile ist ein Muster."
-    echo "Leer lassen und Enter drücken, um die Eingabe zu beenden."
-    local source_files_dir_ignore_patterns=()
-    local ignore_index=1
-    while true; do
-        read -rp "Auszuschließendes Muster $ignore_index (leer = fertig): " current_ignore_pattern
-        if [ -z "$current_ignore_pattern" ]; then
-            break
-        fi
-        source_files_dir_ignore_patterns+=("$current_ignore_pattern")
-        ignore_index=$((ignore_index + 1))
-    done
 
-    # Muster als sicher gequotetes Bash-Array-Literal aufbereiten, damit sie beim
-    # erneuten Einlesen (source) unverändert und vollständig erhalten bleiben.
+    if [ "${#source_files_dir_ignore_patterns[@]}" -eq 0 ]; then
+        echo
+        echo "--- Auszuschließende Ordner/Dateien (optional) ---"
+        echo "Jedes Muster einzeln eingeben (z.B. */cache/* oder */backups/*)."
+        echo "OHNE Anführungszeichen eintippen - jede Zeile ist ein Muster."
+        echo "Leer lassen und Enter drücken, um die Eingabe zu beenden."
+        local ignore_index=1
+        while true; do
+            read -rp "Auszuschließendes Muster $ignore_index (leer = fertig): " current_ignore_pattern
+            if [ -z "$current_ignore_pattern" ]; then
+                break
+            fi
+            source_files_dir_ignore_patterns+=("$current_ignore_pattern")
+            ignore_index=$((ignore_index + 1))
+        done
+    fi
+
+    # Muster als sicher gequotetes Bash-Array-Literal aufbereiten
     local source_files_dir_ignore_literal=''
     local single_ignore_pattern
     for single_ignore_pattern in "${source_files_dir_ignore_patterns[@]}"; do
-        # jedes einzelne Anführungszeichen im Muster sicher escapen ('  ->  '\'')
         local escaped_ignore_pattern=${single_ignore_pattern//\'/\'\\\'\'}
         source_files_dir_ignore_literal+=" '$escaped_ignore_pattern'"
     done
-    # führendes Leerzeichen entfernen
     source_files_dir_ignore_literal="${source_files_dir_ignore_literal# }"
 
     echo
@@ -258,6 +826,7 @@ function run_setup_assistant() {
     local sftp_user=''
     local sftp_key=''
     local sftp_directory=''
+    local sftp_path_to_ssh_binary='/usr/bin/ssh'
     if [ "$sftp_host" != "" ]; then
         read -rp "sftp Port [22]: " sftp_port
         sftp_port=${sftp_port:-22}
@@ -265,6 +834,8 @@ function run_setup_assistant() {
         read -rp "Pfad zum privaten SSH-Key [$HOME/.ssh/id_rsa_backup]: " sftp_key
         sftp_key=${sftp_key:-$HOME/.ssh/id_rsa_backup}
         read -rp "sftp Zielverzeichnis (optional): " sftp_directory
+        read -rp "Pfad zum lokalen ssh-Binary [/usr/bin/ssh]: " input_sftp_ssh_bin
+        sftp_path_to_ssh_binary=${input_sftp_ssh_bin:-/usr/bin/ssh}
     fi
 
     echo
@@ -294,62 +865,12 @@ function run_setup_assistant() {
         default_scope="alles"
     fi
 
-    local ssh_binary_path
-    ssh_binary_path="$(command -v ssh || echo /usr/bin/ssh)"
-
-    cat > "$target_env_file" <<EOF
-# Zugangsdaten & Konfiguration für Projekt '$project_name'
-# automatisch erstellt am $(date) durch den Setup-Assistenten
-# Diese Datei enthält Zugangsdaten und sollte NICHT ins Git-Repository eingecheckt werden (siehe .gitignore).
-
-PROJECT_NAME='$project_name'
-PROJEKT_BASIS_DATEINAME='$projekt_basis_dateiname'
-
-# Was soll standardmäßig gesichert werden, wenn nicht per --scope angegeben: alles / db / dateien
-DEFAULT_SCOPE='$default_scope'
-
-DB_COUNT='$db_count'
-EOF
-
-    local db_write_i
-    for ((db_write_i=0; db_write_i<db_count; db_write_i++)); do
-        local db_write_idx=$((db_write_i + 1))
-        cat >> "$target_env_file" <<EOF
-DB_${db_write_idx}_HOST='${db_hosts[$db_write_i]}'
-DB_${db_write_idx}_NAME='${db_names[$db_write_i]}'
-DB_${db_write_idx}_USER='${db_users[$db_write_i]}'
-DB_${db_write_idx}_PASSWORD='${db_passwords[$db_write_i]}'
-EOF
+    local db_args=()
+    for ((i=0; i<${#db_names[@]}; i++)); do
+        db_args+=("${db_hosts[$i]}" "${db_names[$i]}" "${db_users[$i]}" "${db_passwords[$i]}")
     done
 
-    cat >> "$target_env_file" <<EOF
-
-SOURCE_FILES_DIR='$source_files_dir'
-# Auszuschließende Muster als Bash-Array - je Element ein Muster.
-# Beispiel: SOURCE_FILES_DIR_IGNORE=('*/cache/*' '*/backups/*')
-SOURCE_FILES_DIR_IGNORE=($source_files_dir_ignore_literal)
-
-SFTP_HOST='$sftp_host'
-SFTP_PORT='$sftp_port'
-SFTP_KEY='$sftp_key'
-SFTP_USER='$sftp_user'
-SFTP_DIRECTORY='$sftp_directory'
-SFTP_PATH_TO_SSH_BINARY='$ssh_binary_path'
-
-RSYNC_HOST='$rsync_host'
-RSYNC_USER='$rsync_user'
-RSYNC_DIRECTORY='$rsync_directory'
-RSYNC_KEY='$rsync_key'
-
-BACKUP_LIVE_TIME='$backup_live_time'
-DELETE_IF_TRANSMITTED='$delete_if_transmitted'
-
-# E-Mail-Benachrichtigung (aktuell noch nicht implementiert)
-STATUS_EMAIL_ADDRESS=''
-ALERT_EMAIL_ADDRESS=''
-EOF
-
-    chmod 600 "$target_env_file"
+    write_project_env_file "$target_env_file" "$project_name" "$projekt_basis_dateiname" "$default_scope" "$source_files_dir" "$source_files_dir_ignore_literal" "$backup_live_time" "$delete_if_transmitted" "$sftp_host" "$sftp_port" "$sftp_user" "$sftp_key" "$sftp_directory" "$sftp_path_to_ssh_binary" "$rsync_host" "$rsync_user" "$rsync_directory" "$rsync_key" "${db_args[@]}"
 
     echo
     echo "======================================"
@@ -364,22 +885,26 @@ EOF
 ################################
 ## Projekt-Konfigurationsdateien ermitteln
 
-shopt -s nullglob
-discovered_env_files=("$basename"/.env.*)
-shopt -u nullglob
+function refresh_env_files() {
+    shopt -s nullglob
+    discovered_env_files=("$basename"/.env.*)
+    shopt -u nullglob
 
-env_files=()
-for candidate_env_file in "${discovered_env_files[@]}"; do
-    if [ "$(basename "$candidate_env_file")" != ".env.example" ]; then
-        env_files+=("$candidate_env_file")
+    env_files=()
+    for candidate_env_file in "${discovered_env_files[@]}"; do
+        if [ "$(basename "$candidate_env_file")" != ".env.example" ]; then
+            env_files+=("$candidate_env_file")
+        fi
+    done
+
+    # Abwärtskompatibilität: eine einzelne alte .env-Datei (ohne Projektnamen) wird als "default"-Projekt behandelt
+    legacy_env_file="$basename/.env"
+    if [ -f "$legacy_env_file" ]; then
+        env_files+=("$legacy_env_file")
     fi
-done
+}
 
-# Abwärtskompatibilität: eine einzelne alte .env-Datei (ohne Projektnamen) wird als "default"-Projekt behandelt
-legacy_env_file="$basename/.env"
-if [ -f "$legacy_env_file" ]; then
-    env_files+=("$legacy_env_file")
-fi
+refresh_env_files
 
 # Hilfsfunktion: liest den Projektnamen aus einer .env-Datei-Pfadangabe ab
 function project_name_from_env_file() {
@@ -672,9 +1197,10 @@ function run_main_menu() {
         echo "  1) Ein Projekt sichern"
         echo "  2) Alle Projekte sichern"
         echo "  3) Neues Projekt einrichten"
-        echo "  4) Datenbank wiederherstellen"
-        echo "  5) Projekt-Datengröße anzeigen"
-        echo "  6) Projektübersicht anzeigen"
+        echo "  4) WordPress-Installationen suchen & einrichten"
+        echo "  5) Datenbank wiederherstellen"
+        echo "  6) Projekt-Datengröße anzeigen"
+        echo "  7) Projektübersicht anzeigen"
         echo "  0) Beenden"
         echo "======================================"
         read -rp "Auswahl: " menu_choice
@@ -700,13 +1226,17 @@ function run_main_menu() {
                 return 0
                 ;;
             4)
+                scan_and_setup_wordpress_sites
+                refresh_env_files
+                ;;
+            5)
                 restore_mode='true'
                 return 0
                 ;;
-            5)
+            6)
                 show_project_data_size
                 ;;
-            6)
+            7)
                 show_project_overview
                 ;;
             0)
@@ -720,21 +1250,52 @@ function run_main_menu() {
     done
 }
 
+# Direkter Aufruf via --scan-wp CLI-Parameter
+if [ "$cli_scan_wp" == "true" ]; then
+    scan_and_setup_wordpress_sites "$cli_scan_wp_path"
+    exit $?
+fi
+
 # Kein Projekt vorhanden -> Setup-Assistent für ein neues Projekt starten
 if [ "${#env_files[@]}" -eq 0 ]; then
-    echo "======================================"
-    echo "Keine Projekt-Konfiguration (.env.<projektname>) gefunden - Setup-Assistent wird gestartet ..."
-    echo "======================================"
-    echo
     if [ -n "$cli_project" ] && [ "$cli_project" != "alle" ]; then
-        new_project_name="$cli_project"
+        echo "======================================"
+        echo "Projekt '$cli_project' existiert noch nicht - Setup-Assistent wird gestartet ..."
+        echo "======================================"
+        echo
+        run_setup_assistant "$cli_project"
+        refresh_env_files
     else
-        read -rp "Name für das neue Projekt (wird für Dateinamen verwendet, z.B. 'kundeA'): " new_project_name
-        new_project_name=${new_project_name// /_}
-        new_project_name=${new_project_name:-projekt1}
+        echo "======================================"
+        echo "Willkommen beim Backup-Skript!"
+        echo "Keine Projekt-Konfiguration (.env.<projektname>) gefunden."
+        echo "======================================"
+        echo "Wie möchten Sie beginnen?"
+        echo "  1) Nach vorhandenen WordPress-Installationen suchen & automatisch einrichten (empfohlen)"
+        echo "  2) Manuell ein neues Projekt einrichten"
+        echo
+        read -rp "Auswahl [1]: " initial_setup_choice
+        initial_setup_choice=${initial_setup_choice:-1}
+
+        if [ "$initial_setup_choice" == "1" ]; then
+            scan_and_setup_wordpress_sites
+            refresh_env_files
+            if [ "${#env_files[@]}" -eq 0 ]; then
+                echo "Es wurde kein Projekt angelegt. Starte manuellen Setup-Assistenten ..."
+                read -rp "Name für das neue Projekt (wird für Dateinamen verwendet, z.B. 'kundeA'): " new_project_name
+                new_project_name=${new_project_name// /_}
+                new_project_name=${new_project_name:-projekt1}
+                run_setup_assistant "$new_project_name"
+                refresh_env_files
+            fi
+        else
+            read -rp "Name für das neue Projekt (wird für Dateinamen verwendet, z.B. 'kundeA'): " new_project_name
+            new_project_name=${new_project_name// /_}
+            new_project_name=${new_project_name:-projekt1}
+            run_setup_assistant "$new_project_name"
+            refresh_env_files
+        fi
     fi
-    run_setup_assistant "$new_project_name"
-    env_files=("$basename/.env.$new_project_name")
 fi
 
 # Interaktives Hauptmenü anzeigen, wenn das Skript ohne Parameter aufgerufen wird

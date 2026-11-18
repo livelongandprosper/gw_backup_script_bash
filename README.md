@@ -121,6 +121,29 @@ optional dessen Größe (`du -sh`) angezeigt werden – praktisch, um vorab
 abzuschätzen, wie groß das Datei-Backup ungefähr wird. Bei sehr großen Ordnern
 kann die Ermittlung der Größe etwas dauern.
 
+### Sicherheit & Robustheit (Einsatz innerhalb & außerhalb des Webroots) ###
+
+Das Skript ist so konzipiert, dass es sowohl **außerhalb des Webroots** (empfohlene Best Practice) als auch **innerhalb des Webroots** sicher und stabil betrieben werden kann:
+
+1. **Webroot-Schutz (.htaccess für Apache 2.4 & 2.2):**
+   - Das Skript erzeugt in allen Backup-Verzeichnissen sowie im `log/`-Ordner automatisch moderne Schutzregeln (`Require all denied` für Apache 2.4 mit Fallback auf `Deny from all` für Apache 2.2).
+   - Im Hauptverzeichnis des Skripts werden sensible Konfigurationsdateien (`.env.*`), Logs (`*.log`), Shellskripte (`*.sh`) und Git-Dateien (`.git*`) vor direktem Webaufruf geschützt, ohne normale Webdateien (z. B. falls das Skript im Webroot liegt) zu blockieren.
+2. **Nginx-Konfiguration (falls im Webroot unter Nginx betrieben):**
+   - Da Nginx keine `.htaccess`-Dateien liest, empfiehlt sich in der Server-Konfiguration:
+     ```nginx
+     location ~ /\.(env|git|htaccess) { deny all; return 404; }
+     location ~ /(log|.*_files)/.*\.(sql|zip|log)$ { deny all; return 404; }
+     ```
+3. **Dateirechte & Umask (`umask 077`):**
+   - Alle neu angelegten Verzeichnisse, Backups, temporären Dateien und Logs werden mit restriktiven Rechten (nur für den ausführenden Benutzer les-/schreibbar) erzeugt. `.env.*`-Dateien werden standardmäßig auf `chmod 600` gesetzt.
+4. **Fehlerbehandlung & Verlässlichkeit bei Datenbank-Dumps:**
+   - Exit-Codes von `mysqldump` und `zip` werden explizit geprüft. Sollte ein Dump fehlschlagen, wird der Vorgang abgebrochen und keine unvollständige oder leere Backup-Datei erstellt.
+   - Standardmäßig werden Tabellenstrukturen, Daten, Routines (`--routines`), Triggers (`--triggers`) und `--quick` gesichert. `DEFINER`-Deklarationen werden automatisch und portabel bereinigt (`CURRENT_USER`), um Restores auf anderen Servern zu vereinfachen.
+5. **Robustes Dateihandling & Bereinigung:**
+   - Dateilisten für sftp werden sicher per Shell-Globbing verarbeitet (kein fehleranfälliges `ls`-Parsing bei Leer- oder Sonderzeichen).
+   - Bereinigungen nach erfolgreicher Übertragung (`delete_if_transmitted`) sowie das Löschen veralteter Backups (`backup_live_time`) erfolgen gezielt über `find` unter Ausschluss der Schutzdateien (`.htaccess`).
+   - Vor jedem Backup-Lauf wird der freie Festplattenspeicher geprüft und bei drohendem Engpass (< 500 MB) eine Warnung ausgegeben.
+
 ## backup_sync_proxy_\[projectname\].sh ##
 
 - Dateien werden aus dem Backup-Verzeichnis eines Serves auf einen Vermittler-Server geladen

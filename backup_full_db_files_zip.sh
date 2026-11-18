@@ -1,6 +1,7 @@
 #!/bin/bash
 basename=$(cd "$(dirname "$0")" && pwd)
 set -o pipefail
+umask 077
 
 before=$(date +%s)
 
@@ -95,6 +96,64 @@ function normalize_scope() {
             ;;
     esac
 }
+
+# Erstellt/aktualisiert Apache-Schutzregeln (.htaccess) für Verzeichnisse (Webroot-Sicherheit für Apache 2.4 & 2.2)
+function ensure_webroot_protection() {
+    local target_dir="$1"
+    local mode="${2:-deny_all}" # 'deny_all' für Backup-/Log-Ordner, 'sensitive_only' für Skript-Wurzelordner
+    [ -d "$target_dir" ] || mkdir -p "$target_dir"
+    chmod 700 "$target_dir" 2>/dev/null || true
+
+    local htaccess_path="${target_dir%/}/.htaccess"
+    if [ ! -f "$htaccess_path" ]; then
+        if [ "$mode" == "sensitive_only" ]; then
+            cat > "$htaccess_path" <<'EOF'
+# Schutz sensibler Dateien vor direktem Web-Aufruf (Apache 2.4 & 2.2)
+<FilesMatch "^(\.env.*|\.git.*|.*\.log|.*\.sh)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+EOF
+        else
+            cat > "$htaccess_path" <<'EOF'
+# Vollständigen Zugriff auf Backups/Logs verweigern (Apache 2.4 & 2.2)
+<IfModule mod_authz_core.c>
+    Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+</IfModule>
+EOF
+        fi
+        chmod 644 "$htaccess_path" 2>/dev/null || true
+    fi
+}
+
+# Prüft den freien Festplattenspeicher und warnt bei Knappheit (< 500 MB)
+function check_disk_space() {
+    local target_dir="$1"
+    local log_target="${2:-/dev/null}"
+    if command -v df >/dev/null 2>&1; then
+        local available_kb
+        available_kb=$(df -Pk "$target_dir" 2>/dev/null | awk 'NR==2 {print $4}')
+        if [ -n "$available_kb" ] && [ "$available_kb" -eq "$available_kb" ] 2>/dev/null; then
+            if [ "$available_kb" -lt 512000 ]; then
+                local avail_mb=$((available_kb / 1024))
+                echo "WARNUNG: Geringer freier Speicherplatz auf dem Ziellaufwerk ($avail_mb MB verbleibend)!" | tee -a "$log_target" >&2
+            fi
+        fi
+    fi
+}
+
+# Basisverzeichnisse für Webroot-Betrieb absichern
+ensure_webroot_protection "$basename" "sensitive_only"
+ensure_webroot_protection "$basename/log" "deny_all"
 
 if [ -n "$cli_scope" ]; then
     normalized_cli_scope="$(normalize_scope "$cli_scope")"
@@ -777,36 +836,57 @@ function backup_db() {
     local db_user=$3
     local db_password=$4
     local db_dateiname="$backup_destiantion$projekt_basis_dateiname"'_'"$(date +%Y-%m-%d_%H-%M-%S)"'_'"$db_name"
+    local sql_file="$db_dateiname$db_dateiendung"
 
     # Datenbanken sichern
     if [ "$db_name" != "" ]
     then
-        echo "Sichern der Datenbank in Datei $db_dateiname$db_dateiendung ..." | tee -a "$log_file_name"
-        MYSQL_PWD="$db_password" mysqldump --single-transaction --replace --skip-lock-tables -h"$db_host" -u"$db_user" "$db_name" > "$db_dateiname$db_dateiendung"
-        echo "erledigt." | tee -a "$log_file_name"
+        echo "Sichern der Datenbank '$db_name' in Datei $sql_file ..." | tee -a "$log_file_name"
+        MYSQL_PWD="$db_password" mysqldump \
+            --single-transaction \
+            --quick \
+            --routines \
+            --triggers \
+            --skip-lock-tables \
+            -h"$db_host" \
+            -u"$db_user" \
+            "$db_name" > "$sql_file" 2>> "$log_file_name"
+        local dump_status=$?
+
+        if [ "$dump_status" -ne 0 ] || [ ! -s "$sql_file" ]; then
+            echo "FEHLER: mysqldump für '$db_name' auf '$db_host' fehlgeschlagen (Exit-Code: $dump_status)!" | tee -a "$log_file_name" >&2
+            rm -f "$sql_file"
+            return 1
+        fi
+
+        echo "Datenbankdump erfolgreich erstellt." | tee -a "$log_file_name"
         echo
 
-        echo "Nachbearbeiten der Sicherung von $db_dateiname$db_dateiendung ..." | tee -a "$log_file_name"
-        # DEFINER=`xyz` mit CURRENT_USER ersetzen
-        sed -ri 's/DEFINER=`[^`]+`@`[^`]+`/DEFINER=CURRENT_USER/g' "$db_dateiname$db_dateiendung" | tee -a "$log_file_name"
+        echo "Nachbearbeiten der Sicherung von $sql_file ..." | tee -a "$log_file_name"
+        # DEFINER bereinigen (portabel via temporärer Datei)
+        local temp_sql="$sql_file.tmp.$$"
+        sed -E 's/DEFINER=(`[^`]+`|"[^"]+"|[a-zA-Z0-9_.-]+)@(`[^`]+`|"[^"]+"|[a-zA-Z0-9_.-]+)/DEFINER=CURRENT_USER/g' "$sql_file" > "$temp_sql" && mv "$temp_sql" "$sql_file"
+        rm -f "$temp_sql"
         echo "erledigt." | tee -a "$log_file_name"
         echo | tee -a "$log_file_name"
 
         # zip
         if ! [ -x "$(command -v zip)" ]; then
-            echo 'Error: zip is not installed.' | tee -a "$log_file_name" >&2
-            echo 'sql file is not compressed' | tee -a "$log_file_name"
+            echo 'Warnung: zip ist nicht installiert.' | tee -a "$log_file_name" >&2
+            echo "SQL-Datei $sql_file bleibt unkomprimiert erhalten." | tee -a "$log_file_name"
         else
-            echo "ZIP-Datei von Sicherung erstellen $db_dateiname$db_dateiendung$dateiendung_zip ..." | tee -a "$log_file_name"
-            zip "$db_dateiname$db_dateiendung$dateiendung_zip" "$db_dateiname$db_dateiendung" | tee -a "$log_file_name"
-            if [ "${PIPESTATUS[0]}" -eq "0" ]
-            then
+            local zip_file="$db_dateiname$db_dateiendung$dateiendung_zip"
+            echo "ZIP-Datei von Sicherung erstellen $zip_file ..." | tee -a "$log_file_name"
+            zip -q "$zip_file" "$sql_file" 2>> "$log_file_name"
+            local zip_status=$?
+
+            if [ "$zip_status" -eq 0 ] && [ -s "$zip_file" ]; then
                 # sql-datei löschen
-                echo "Unkomprimierte Datei löschen $db_dateiname$db_dateiendung ..." | tee -a "$log_file_name"
-                rm -v "$db_dateiname$db_dateiendung" | tee -a "$log_file_name"
-                echo | tee -a "$log_file_name"
+                echo "Unkomprimierte Datei löschen $sql_file ..." | tee -a "$log_file_name"
+                rm -f "$sql_file"
             else
-                echo "Zip-Datei konnte nicht erstellt werden. $db_dateiname$db_dateiendung bleibt erhalten." | tee -a "$log_file_name"
+                echo "Warnung: ZIP-Erstellung fehlgeschlagen (Status: $zip_status). $sql_file bleibt erhalten." | tee -a "$log_file_name" >&2
+                return_value=1
             fi
             echo | tee -a "$log_file_name"
         fi
@@ -929,14 +1009,16 @@ function run_backup_for_project() {
     status_email_address="$STATUS_EMAIL_ADDRESS"
     alert_email_address="$ALERT_EMAIL_ADDRESS"
 
-    # Backup Zielordner
+    # Backup Zielordner & Logs sicher anlegen (Webroot-Schutz für Apache 2.4/2.2)
     backup_destiantion="$basename/$projekt_basis_dateiname/"
-    mkdir -p "$backup_destiantion"
-    mkdir -p "$basename/log/"
+    ensure_webroot_protection "$backup_destiantion" "deny_all"
+    ensure_webroot_protection "$basename/log" "deny_all"
 
     # Dateien
     dateien_dateiname="$backup_destiantion$projekt_basis_dateiname"'_'"$(date +%Y-%m-%d_%H-%M-%S)"'_'files
     log_file_name="$basename/log/$projekt_basis_dateiname"'_'"$(date +%Y-%m-%d_%H-%M-%S)"'.log'
+    touch "$log_file_name"
+    chmod 600 "$log_file_name" 2>/dev/null || true
 
     # Dateiendungen
     dateiendung_zip='.zip'
@@ -944,15 +1026,6 @@ function run_backup_for_project() {
 
     # Kontrollvariablen
     transmitted=''
-
-    # .htaccess generieren, falls noch nicht vorhanden
-    htaccess_file="$backup_destiantion.htaccess"
-    if [ ! -f "$htaccess_file" ]; then
-        echo "deny from all" > "$htaccess_file"
-        echo ".htaccess-Datei wurde erstellt, um den Zugriff zu verweigern." | tee -a "$log_file_name"
-    else
-        echo ".htaccess-Datei existiert" | tee -a "$log_file_name"
-    fi
 
     ################################
     ################################
@@ -970,6 +1043,9 @@ function run_backup_for_project() {
     echo | tee -a "$log_file_name"
     echo
 
+    # Freien Festplattenspeicher prüfen
+    check_disk_space "$backup_destiantion" "$log_file_name"
+
     # Datenbanken sichern (beliebig viele), nur wenn Umfang alles oder db
     if [ "$run_scope" == "alles" ] || [ "$run_scope" == "db" ]; then
         for ((db_backup_i=0; db_backup_i<${#db_names[@]}; db_backup_i++))
@@ -985,20 +1061,30 @@ function run_backup_for_project() {
     if [ "$run_scope" == "alles" ] || [ "$run_scope" == "dateien" ]; then
         if [ "$source_files_dir" != "" ]
         then
-            if ! [ -x "$(command -v zip)" ]; then
-                echo 'Error: zip is not installed.' | tee -a "$log_file_name" >&2
-                echo 'files could not be packed into zip file' | tee -a "$log_file_name"
+            if [ ! -d "$source_files_dir" ]; then
+                echo "Warnung: Website-Verzeichnis '$source_files_dir' existiert nicht oder ist kein Verzeichnis." | tee -a "$log_file_name" >&2
+            elif ! [ -x "$(command -v zip)" ]; then
+                echo 'Fehler: zip ist nicht installiert.' | tee -a "$log_file_name" >&2
+                echo 'Website-Dateien konnten nicht gesichert werden.' | tee -a "$log_file_name"
             else
+                local zip_target="$dateien_dateiname$dateiendung_zip"
                 echo "ZIP-Datei von Dateien im Website-Verzeichnis ($source_files_dir) erstellen ..." | tee -a "$log_file_name"
+                local zip_files_status=0
                 if [ "${#source_files_dir_ignore[@]}" -gt "0" ] && [ "${source_files_dir_ignore[0]}" != "" ]
                 then
                     echo " ausgeschlossene(r) Ordner: ${source_files_dir_ignore[*]}" | tee -a "$log_file_name"
-                    zip -rq "$dateien_dateiname$dateiendung_zip" "$source_files_dir" -x "${source_files_dir_ignore[@]}" | tee -a "$log_file_name"
+                    zip -rq "$zip_target" "$source_files_dir" -x "${source_files_dir_ignore[@]}" 2>> "$log_file_name"
+                    zip_files_status=$?
                 else
-                    zip -rq "$dateien_dateiname$dateiendung_zip" "$source_files_dir" | tee -a "$log_file_name"
+                    zip -rq "$zip_target" "$source_files_dir" 2>> "$log_file_name"
+                    zip_files_status=$?
                 fi
-                echo "erledigt."
-                echo
+                if [ "$zip_files_status" -eq 0 ] || [ "$zip_files_status" -eq 12 ]; then
+                    echo "erledigt." | tee -a "$log_file_name"
+                else
+                    echo "Warnung: zip beendete mit Exit-Code $zip_files_status" | tee -a "$log_file_name" >&2
+                fi
+                echo | tee -a "$log_file_name"
             fi
         fi
     else
@@ -1014,18 +1100,20 @@ function run_backup_for_project() {
         echo " entfernter Ordner: $rsync_directory" | tee -a "$log_file_name"
         if [ "$rsync_key" != "" ]
         then
-            rsync -rltDvzre "ssh -i $rsync_key" --progress "$backup_destiantion" "$rsync_user@$rysnc_host:$rsync_directory" | tee -a "$log_file_name"
+            rsync -rltDvzre "ssh -i $rsync_key" --exclude='.htaccess' --progress "$backup_destiantion" "$rsync_user@$rysnc_host:$rsync_directory" 2>&1 | tee -a "$log_file_name"
         else
-            rsync -rltDvzre "ssh" --progress "$backup_destiantion" "$rsync_user@$rysnc_host:$rsync_directory" | tee -a "$log_file_name"
+            rsync -rltDvzre "ssh" --exclude='.htaccess' --progress "$backup_destiantion" "$rsync_user@$rysnc_host:$rsync_directory" 2>&1 | tee -a "$log_file_name"
         fi
+        local rsync_status="${PIPESTATUS[0]}"
 
         # Wurden die Daten übertragen?
-        if [ "${PIPESTATUS[0]}" -eq "0" ]
+        if [ "$rsync_status" -eq 0 ]
         then
           transmitted='true'
+          echo "rsync-Synchronisation erfolgreich abgeschlossen." | tee -a "$log_file_name"
         else
           transmitted=''
-          echo "Error while running rsync" | tee -a "$log_file_name"
+          echo "Fehler bei der rsync-Synchronisation (Status: $rsync_status)" | tee -a "$log_file_name" >&2
         fi
     fi
     echo | tee -a "$log_file_name"
@@ -1035,57 +1123,76 @@ function run_backup_for_project() {
     then
         echo "Dateien auf entfernten Server kopieren (sftp)..." | tee -a "$log_file_name"
         # batchfile für sftp erstellen
+        local sftp_batchfile="$basename/.${projekt_basis_dateiname}_sftp_upload_batchfile_$$"
+        touch "$sftp_batchfile"
+        chmod 600 "$sftp_batchfile" 2>/dev/null || true
+
         if [ "$sftp_directory" != "" ]
         then
-            echo "cd $sftp_directory" >> "$sftp_batchfile"
+            echo "cd \"$sftp_directory\"" > "$sftp_batchfile"
+        else
+            : > "$sftp_batchfile"
         fi
 
-        for i in $(ls -x -1 "$backup_destiantion")
-        do
-            echo "put $backup_destiantion/$i" >> "$sftp_batchfile"
+        local file_path
+        local filename
+        for file_path in "$backup_destiantion"*; do
+            [ -f "$file_path" ] || continue
+            filename="$(basename "$file_path")"
+            [ "$filename" = ".htaccess" ] && continue
+            echo "put \"$file_path\"" >> "$sftp_batchfile"
         done
         echo "exit" >> "$sftp_batchfile"
 
         # hier ist der eigentliche upload auf den backup-server
-        sftp -S "$sftp_path_to_ssh_binary" -b "$sftp_batchfile" -o PubkeyAuthentication=yes -o IdentityFile="$sftp_key" -o Port="$sftp_port" "$sftp_user@$sftp_host" | tee -a "$log_file_name"
+        sftp -S "$sftp_path_to_ssh_binary" -b "$sftp_batchfile" -o PubkeyAuthentication=yes -o IdentityFile="$sftp_key" -o Port="$sftp_port" "$sftp_user@$sftp_host" 2>&1 | tee -a "$log_file_name"
+        local sftp_status="${PIPESTATUS[0]}"
 
         # Wurden die Daten übertragen?
-        if [ "${PIPESTATUS[0]}" -eq "0" ]
+        if [ "$sftp_status" -eq 0 ]
         then
           transmitted='true'
+          echo "sftp-Übertragung erfolgreich abgeschlossen." | tee -a "$log_file_name"
         else
           transmitted=''
-          echo "Error while running sftp" | tee -a "$log_file_name"
+          echo "Fehler bei der sftp-Übertragung (Status: $sftp_status)" | tee -a "$log_file_name" >&2
         fi
 
         # Dokumenation in logfile
-        echo "logfile content:" >> "$log_file_name"
+        echo "sftp batchfile content:" >> "$log_file_name"
         echo "-----" >> "$log_file_name"
-        cat "$sftp_batchfile" >> "$log_file_name"
+        cat "$sftp_batchfile" >> "$log_file_name" 2>/dev/null || true
         echo "-----" >> "$log_file_name"
 
         # batch file löschen
-        rm -v "$sftp_batchfile" | tee -a "$log_file_name"
+        rm -f "$sftp_batchfile"
         echo | tee -a "$log_file_name"
     fi
 
     # Dateien löschen, wenn erfolgreich übermittelt wurde
-    if [ \( "$delete_if_transmitted" == "true" \) -a \( "$transmitted" == "true" \) ]
+    if [ "$delete_if_transmitted" == "true" ] && [ "$transmitted" == "true" ]
     then
         echo "Dateien in $backup_destiantion werden nach erfolgreicher Übertragung gelöscht ..." | tee -a "$log_file_name"
-        rm -v "$backup_destiantion"* | tee -a "$log_file_name"
+        if [ -n "$backup_destiantion" ] && [ -d "$backup_destiantion" ]; then
+            find "$backup_destiantion" -maxdepth 1 -type f ! -name '.htaccess' -delete -print | tee -a "$log_file_name"
+        fi
         echo "erledigt." | tee -a "$log_file_name"
         echo | tee -a "$log_file_name"
         echo
     fi
 
     # Dateien, die älter als $backup_live_time Tage sind löschen
-    if [ \( "$backup_destiantion" != "" \) -a \( "$backup_live_time" != "0" \) ]
+    if [ -n "$backup_destiantion" ] && [ -d "$backup_destiantion" ] && [ "$backup_live_time" != "0" ] && [ "$backup_live_time" -gt 0 ] 2>/dev/null
     then
         echo "Dateien in $backup_destiantion älter als $backup_live_time Tage löschen ..." | tee -a "$log_file_name"
-        find "$backup_destiantion" -mtime +"$backup_live_time" -type f ! -regex '.*\.sh' -delete -print | tee -a "$log_file_name"
+        find "$backup_destiantion" -maxdepth 1 -type f ! -name '.htaccess' ! -name '*.sh' -mtime +"$backup_live_time" -delete -print | tee -a "$log_file_name"
         echo "erledigt." | tee -a "$log_file_name"
         echo | tee -a "$log_file_name"
+    fi
+
+    # Alte Logs bereinigen, wenn backup_live_time konfiguriert ist
+    if [ "$backup_live_time" != "0" ] && [ "$backup_live_time" -gt 0 ] 2>/dev/null; then
+        find "$basename/log" -maxdepth 1 -type f -name '*.log' -mtime +"$backup_live_time" -delete 2>/dev/null || true
     fi
 
     echo | tee -a "$log_file_name"

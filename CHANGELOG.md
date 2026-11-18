@@ -10,6 +10,17 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
 ## [2.0.0] - 2026-11-18
 
 ### Hinzugefügt
+- **Pre-Backup & System-/Sicherheitsprüfungen (`--check` / Menüpunkt 5):**
+  - Automatischer Vorab-Check vor jedem Backup sowie manuell über das Hauptmenü oder CLI-Parameter `--check` / `--pre-check`.
+  - Farbcodierte visuelle Auswertung (`[✓ OK]` grün, `[⚠ WARNUNG]` gelb, `[✖ ACHTUNG]` rot, `[ℹ INFO]` cyan) mit Zusammenfassungsfazit im Terminal und sauberer Klartext-Dokumentation im Logfile.
+  - **WordPress-Diagnose:** Erkennung und Warnung bei aktivem `WP_DEBUG` und gefährlichem `WP_DEBUG_DISPLAY` (Frontend-Fehlerausgabe an Besucher).
+  - **Log-Überwachung:** Aufspüren von `wp-content/debug.log` mit Größenwarnung (> 10 MB) sowie Standard-PHP-`error_log`-Dateien.
+  - **Wartungsmodus:** Erkennung aktiver `.maintenance`-Dateien vor Updates.
+  - **Rudimentäre Sicherheits- & Malware-Heuristik:**
+    - Auffinden von verdächtigen PHP-Skripten im Upload-Verzeichnis (`wp-content/uploads/`) zur frühzeitigen Erkennung von Webshells/Backdoors.
+    - Prüfung von `wp-config.php` und `index.php` auf verschleierte Code-Muster (`eval(base64_decode...)`).
+    - Erkennung versteckter PHP-Dateien (`.*.php`) im Webroot.
+  - **Datenbank-Live-Check:** Verbindungstest vor Dump-Beginn mit Ermittlung der Tabellenanzahl.
 - **Automatische WordPress-Erkennung & Auto-Import (`--scan-wp` / Menüpunkt 4):**
   - Selbstständiger Suchlauf nach WordPress-Installationen in relativen (z. B. `..`) oder absoluten Verzeichnissen.
   - Sicheres und portables Auslesen von Datenbank-Zugangsdaten (`DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`) aus `wp-config.php` via PHP-Token-Parser (inkl. Regex-Fallback).
@@ -29,8 +40,12 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
   - Bereinigung der Konfigurationsdateien: Redundante Abwärtskompatibilitäts-Variablen (`DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`) werden in neu erstellten `.env`-Dateien nicht mehr geschrieben; es wird ausschließlich die klare Multi-Datenbank-Struktur (`DB_COUNT`, `DB_1_*`, etc.) genutzt.
 - **Zuverlässigkeit bei Datenbank-Dumps & Archivierung:**
   - Explizite Exit-Code- und Nicht-Leer-Prüfung bei `mysqldump` und `zip`; fehlerhafte oder unvollständige Dump-Dateien brechen den Vorgang sofort sauber ab und werden bereinigt.
-  - Standardmäßiger Export mit `--routines`, `--triggers` und `--quick` zur vollständigen Sicherung von Stored Procedures und Triggern.
+  - Standardmäßiger Export mit `--routines`, `--triggers`, `--quick`, `--max_allowed_packet=512M` und `--default-character-set=utf8mb4` für maximale Datenintegrität und zuverlässigen Export großer Tabellen/BLOBs.
+  - Automatische Unterstützung moderner MySQL- und Cloud-DB-Optionen (`--column-statistics=0` und `--set-gtid-purged=OFF`, sofern unterstützt) und saubere Port-Trennung (`-P`).
   - Plattformunabhängige und verlässliche `DEFINER`-Bereinigung (`DEFINER=CURRENT_USER`) zur Erleichterung von Server-Restores.
+  - Symbolische Links werden beim Zippen von Website-Dateien (`zip -y`) als Symlinks erhalten, um doppeltes Einpacken und Endlosschleifen zu verhindern.
+- **Erweiterte Standard-Ausschlussregeln:**
+  - Vorkonfigurierte Ausschlussmuster umfassen nun neben Caches auch Wordfence-Logs (`wflogs`), `debug.log`, `error_log`, diverse Backup-Plugin-Verzeichnisse (Updraft, Ai1wm, BackupBuddy, Snapshots, WP Clone), `.DS_Store`, `Thumbs.db` und `node_modules`.
 - **Dateihandling & Bereinigung:**
   - Ersetzung des fehleranfälligen `ls`-Parsings bei SFTP-Übertragungen durch direktes Shell-Globbing.
   - Vollständige Portabilität bei `sed`-Operationen (POSIX-konform ohne proprietäre `-E`-Flags) zur fehlerfreien Ausführung auf allen GNU- und BSD/macOS-Systemen.

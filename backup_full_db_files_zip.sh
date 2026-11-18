@@ -3,6 +3,27 @@ basename=$(cd "$(dirname "$0")" && pwd)
 set -o pipefail
 umask 077
 
+# Farbdefinitionen für interaktive Terminalausgabe (wird für Log-Dateien automatisch bereinigt)
+if [ -t 1 ]; then
+    CLR_RESET=$'\033[0m'
+    CLR_BOLD=$'\033[1m'
+    CLR_GREEN=$'\033[0;32m'
+    CLR_RED=$'\033[0;31m'
+    CLR_YELLOW=$'\033[0;33m'
+    CLR_BLUE=$'\033[0;34m'
+    CLR_CYAN=$'\033[0;36m'
+    CLR_GRAY=$'\033[0;90m'
+else
+    CLR_RESET=''
+    CLR_BOLD=''
+    CLR_GREEN=''
+    CLR_RED=''
+    CLR_YELLOW=''
+    CLR_BLUE=''
+    CLR_CYAN=''
+    CLR_GRAY=''
+fi
+
 before=$(date +%s)
 
 ###
@@ -56,6 +77,7 @@ before=$(date +%s)
 cli_project=''
 cli_scope=''
 restore_mode='false'
+check_mode='false'
 cli_scan_wp='false'
 cli_scan_wp_path=''
 
@@ -69,6 +91,9 @@ for cli_arg in "$@"; do
             ;;
         --restore)
             restore_mode='true'
+            ;;
+        --check|--pre-check)
+            check_mode='true'
             ;;
         --scan-wp)
             cli_scan_wp='true'
@@ -87,10 +112,11 @@ for cli_arg in "$@"; do
             cli_scan_wp_path="${cli_arg#*=}"
             ;;
         --help|-h)
-            echo "Verwendung: $0 [--project=<name>|alle] [--scope=alles|db|dateien] [--restore] [--scan-wp[=<ordner>]]"
+            echo "Verwendung: $0 [--project=<name>|alle] [--scope=alles|db|dateien] [--restore] [--check] [--scan-wp[=<ordner>]]"
             echo "  --project   Projekt-Konfiguration (.env.<name>), die verwendet werden soll. 'alle' verarbeitet alle gefundenen Projekte."
             echo "  --scope     Was gesichert werden soll: alles (Standard), db (nur Datenbank(en)) oder dateien (nur Website-Dateien)."
             echo "  --restore   Datenbank aus einem vorhandenen Backup wiederherstellen (interaktiv), statt ein Backup zu erstellen."
+            echo "  --check     Führt Pre-Backup & Sicherheitsprüfungen für das Projekt durch, ohne ein Backup zu erstellen."
             echo "  --scan-wp   Sucht nach WordPress-Installationen in <ordner> (Standard: ..) und richtet diese interaktiv ein."
             echo "Ohne Parameter wird im Terminal das interaktive Hauptmenü angezeigt."
             exit 0
@@ -157,6 +183,54 @@ EOF
     fi
 }
 
+# Formatiert und gibt eine Prüfzeile für Pre-Checks / Statusanzeigen aus
+# Ausgabe auf dem Terminal farbig (grün / gelb / rot / cyan), in Log-Dateien sauber als Text
+function log_check_item() {
+    local status="$1"    # "OK", "WARN", "ALERT", "INFO"
+    local message="$2"
+    local log_file="${3:-}"
+    local details="${4:-}"
+
+    local symbol=""
+    local color=""
+    case "$status" in
+        OK)
+            symbol="[✓ OK]"
+            color="${CLR_GREEN}"
+            ;;
+        WARN)
+            symbol="[⚠ WARNUNG]"
+            color="${CLR_YELLOW}"
+            ;;
+        ALERT|ERROR)
+            symbol="[✖ ACHTUNG]"
+            color="${CLR_RED}"
+            ;;
+        INFO)
+            symbol="[ℹ INFO]"
+            color="${CLR_CYAN}"
+            ;;
+        *)
+            symbol="[•]"
+            color="${CLR_GRAY}"
+            ;;
+    esac
+
+    # Terminal-Ausgabe mit Farbe
+    printf "  %b%-12s%b %s\n" "${color}${CLR_BOLD}" "$symbol" "${CLR_RESET}" "$message"
+    if [ -n "$details" ]; then
+        printf "               %b%s%b\n" "${CLR_GRAY}" "$details" "${CLR_RESET}"
+    fi
+
+    # Saubere Log-Ausgabe ohne ANSI-Steuerzeichen
+    if [ -n "$log_file" ] && [ -f "$log_file" ]; then
+        printf "  %-12s %s\n" "$symbol" "$message" >> "$log_file"
+        if [ -n "$details" ]; then
+            printf "               %s\n" "$details" >> "$log_file"
+        fi
+    fi
+}
+
 # Prüft den freien Festplattenspeicher und warnt bei Knappheit (< 500 MB)
 function check_disk_space() {
     local target_dir="$1"
@@ -167,7 +241,7 @@ function check_disk_space() {
         if [ -n "$available_kb" ] && [ "$available_kb" -eq "$available_kb" ] 2>/dev/null; then
             if [ "$available_kb" -lt 512000 ]; then
                 local avail_mb=$((available_kb / 1024))
-                echo "WARNUNG: Geringer freier Speicherplatz auf dem Ziellaufwerk ($avail_mb MB verbleibend)!" | tee -a "$log_target" >&2
+                log_check_item "ALERT" "Geringer freier Speicherplatz auf Ziellaufwerk ($avail_mb MB verbleibend)!" "$log_target"
             fi
         fi
     fi
@@ -224,10 +298,17 @@ function resolve_dir_path() {
 function extract_wp_constant_sed() {
     local file="$1"
     local const_name="$2"
-    sed -n "s/^[[:space:]]*define([[:space:]]*['\"]${const_name}['\"][[:space:]]*,[[:space:]]*['\"]\([^'\"]*\)['\"][[:space:]]*);.*/\1/p" "$file" | head -n 1
+    local val
+    # Format mit Anführungszeichen: define('NAME', 'wert');
+    val=$(sed -n "s/^[[:space:]]*define([[:space:]]*['\"]${const_name}['\"][[:space:]]*,[[:space:]]*['\"]\([^'\"]*\)['\"][[:space:]]*);.*/\1/p" "$file" | head -n 1)
+    if [ -z "$val" ]; then
+        # Format ohne Anführungszeichen (z.B. booleans/zahlen): define('NAME', true);
+        val=$(sed -n "s/^[[:space:]]*define([[:space:]]*['\"]${const_name}['\"][[:space:]]*,[[:space:]]*\([a-zA-Z0-9_]*\)[[:space:]]*);.*/\1/p" "$file" | head -n 1)
+    fi
+    echo "$val"
 }
 
-# Liest Datenbank- und Website-Parameter aus einer wp-config.php aus
+# Liest Datenbank-, Website- und Debug-Parameter aus einer wp-config.php aus
 function parse_wp_config_file() {
     local wp_config_file="$1"
     [ -f "$wp_config_file" ] || return 1
@@ -239,6 +320,10 @@ function parse_wp_config_file() {
     WP_PARSED_SITEURL=""
     WP_PARSED_HOME=""
     WP_PARSED_PREFIX="wp_"
+    WP_PARSED_DEBUG="false"
+    WP_PARSED_DEBUG_LOG="false"
+    WP_PARSED_DEBUG_DISPLAY="false"
+    WP_PARSED_SCRIPT_DEBUG="false"
 
     # Bevorzugt: PHP Token-Parsing (für 100% PHP-Syntax- und String-Kompatibilität)
     if command -v php >/dev/null 2>&1; then
@@ -256,7 +341,11 @@ function parse_wp_config_file() {
             "DB_HOST" => "localhost",
             "WP_SITEURL" => "",
             "WP_HOME" => "",
-            "table_prefix" => "wp_"
+            "table_prefix" => "wp_",
+            "WP_DEBUG" => "false",
+            "WP_DEBUG_LOG" => "false",
+            "WP_DEBUG_DISPLAY" => "false",
+            "SCRIPT_DEBUG" => "false"
         ];
         for ($i = 0; $i < $count; $i++) {
             if (is_array($tokens[$i])) {
@@ -265,20 +354,39 @@ function parse_wp_config_file() {
                     $val = null;
                     $j = $i + 1;
                     while ($j < $count && $tokens[$j] !== ";") {
-                        if (is_array($tokens[$j]) && $tokens[$j][0] === T_CONSTANT_ENCAPSED_STRING) {
+                        if (is_array($tokens[$j])) {
+                            $tok_type = $tokens[$j][0];
                             $raw = $tokens[$j][1];
-                            $quote = $raw[0];
-                            $inner = substr($raw, 1, -1);
-                            if ($quote === "\x27") {
-                                $unescaped = str_replace(["\\\\", "\\\x27"], ["\\", "\x27"], $inner);
-                            } else {
-                                $unescaped = stripcslashes($inner);
-                            }
-                            if ($name === null) {
-                                $name = $unescaped;
-                            } else if ($val === null) {
-                                $val = $unescaped;
-                                break;
+                            if ($tok_type === T_CONSTANT_ENCAPSED_STRING) {
+                                $quote = $raw[0];
+                                $inner = substr($raw, 1, -1);
+                                if ($quote === "\x27") {
+                                    $unescaped = str_replace(["\\\\", "\\\x27"], ["\\", "\x27"], $inner);
+                                } else {
+                                    $unescaped = stripcslashes($inner);
+                                }
+                                if ($name === null) {
+                                    $name = $unescaped;
+                                } else if ($val === null) {
+                                    $val = $unescaped;
+                                    break;
+                                }
+                            } elseif ($tok_type === T_STRING) {
+                                $lower = strtolower($raw);
+                                if ($name === null) {
+                                    $name = $raw;
+                                } else if ($val === null) {
+                                    if ($lower === "true") $val = "true";
+                                    elseif ($lower === "false") $val = "false";
+                                    elseif ($lower === "null") $val = "null";
+                                    else $val = $raw;
+                                    break;
+                                }
+                            } elseif ($tok_type === T_LNUMBER || $tok_type === T_DNUMBER) {
+                                if ($val === null && $name !== null) {
+                                    $val = $raw;
+                                    break;
+                                }
                             }
                         }
                         $j++;
@@ -320,6 +428,10 @@ function parse_wp_config_file() {
                     WP_SITEURL) WP_PARSED_SITEURL="$v" ;;
                     WP_HOME) WP_PARSED_HOME="$v" ;;
                     table_prefix) WP_PARSED_PREFIX="${v:-wp_}" ;;
+                    WP_DEBUG) WP_PARSED_DEBUG="$v" ;;
+                    WP_DEBUG_LOG) WP_PARSED_DEBUG_LOG="$v" ;;
+                    WP_DEBUG_DISPLAY) WP_PARSED_DEBUG_DISPLAY="$v" ;;
+                    SCRIPT_DEBUG) WP_PARSED_SCRIPT_DEBUG="$v" ;;
                 esac
             done <<< "$parsed_output"
             return 0
@@ -334,6 +446,10 @@ function parse_wp_config_file() {
     WP_PARSED_DB_HOST="${WP_PARSED_DB_HOST:-localhost}"
     WP_PARSED_SITEURL="$(extract_wp_constant_sed "$wp_config_file" WP_SITEURL)"
     WP_PARSED_HOME="$(extract_wp_constant_sed "$wp_config_file" WP_HOME)"
+    WP_PARSED_DEBUG="$(extract_wp_constant_sed "$wp_config_file" WP_DEBUG)"
+    WP_PARSED_DEBUG_LOG="$(extract_wp_constant_sed "$wp_config_file" WP_DEBUG_LOG)"
+    WP_PARSED_DEBUG_DISPLAY="$(extract_wp_constant_sed "$wp_config_file" WP_DEBUG_DISPLAY)"
+    WP_PARSED_SCRIPT_DEBUG="$(extract_wp_constant_sed "$wp_config_file" SCRIPT_DEBUG)"
 }
 
 # Erstellt einen sauberen Namensvorschlag für das Projekt anhand URL / Blogname / Ordnername
@@ -608,12 +724,12 @@ function scan_and_setup_wordpress_sites() {
         local source_files_dir="${input_source_files_dir:-$cur_site_dir}"
 
         echo
-        read -rp "Standard-Ausschlussmuster für WordPress (Cache & Backups) verwenden? (J/n) [J]: " wp_ignore_choice
+        read -rp "Standard-Ausschlussmuster für WordPress (Cache, Backups, Logs, .DS_Store) verwenden? (J/n) [J]: " wp_ignore_choice
         wp_ignore_choice=${wp_ignore_choice:-J}
         local source_files_dir_ignore_literal=""
         if [[ "$wp_ignore_choice" =~ ^[jJyY]$ ]]; then
-            source_files_dir_ignore_literal="'*/wp-content/cache/*' '*/wp-content/uploads/cache/*' '*/wp-content/updraft/*' '*/wp-content/backups/*' '*/wp-content/ai1wm-backups/*' '*/.git/*'"
-            echo " -> Ausschlüsse gesetzt: Cache, Uploads-Cache, Updraft/Ai1wm-Backups, .git"
+            source_files_dir_ignore_literal="'*/wp-content/cache/*' '*/wp-content/uploads/cache/*' '*/wp-content/updraft/*' '*/wp-content/backups/*' '*/wp-content/ai1wm-backups/*' '*/wp-content/uploads/wp-clone/*' '*/wp-content/uploads/backupbuddy_backups/*' '*/wp-content/uploads/snapshots/*' '*/wp-content/wflogs/*' '*/wp-content/debug.log' '*/error_log' '*/*.log' '*/.git/*' '*/.svn/*' '*/node_modules/*' '*/.DS_Store' '*/Thumbs.db'"
+            echo " -> Ausschlüsse gesetzt: Cache, Upload-Caches, Backup-Plugins, Debug-/Error-Logs, .git, .DS_Store"
         fi
 
         echo
@@ -712,10 +828,28 @@ function run_setup_assistant() {
                         db_users+=("$current_db_user")
                         db_passwords+=("$current_db_password")
 
-                        read -rp "Standard-Ausschlussmuster für WordPress (Cache & Backups) anwenden? (J/n) [J]: " wp_ignore_choice
+                        read -rp "Standard-Ausschlussmuster für WordPress (Cache, Backups, Logs, .DS_Store) anwenden? (J/n) [J]: " wp_ignore_choice
                         wp_ignore_choice=${wp_ignore_choice:-J}
                         if [[ "$wp_ignore_choice" =~ ^[jJyY]$ ]]; then
-                            source_files_dir_ignore_patterns=('*/wp-content/cache/*' '*/wp-content/uploads/cache/*' '*/wp-content/updraft/*' '*/wp-content/backups/*' '*/wp-content/ai1wm-backups/*' '*/.git/*')
+                            source_files_dir_ignore_patterns=(
+                                '*/wp-content/cache/*'
+                                '*/wp-content/uploads/cache/*'
+                                '*/wp-content/updraft/*'
+                                '*/wp-content/backups/*'
+                                '*/wp-content/ai1wm-backups/*'
+                                '*/wp-content/uploads/wp-clone/*'
+                                '*/wp-content/uploads/backupbuddy_backups/*'
+                                '*/wp-content/uploads/snapshots/*'
+                                '*/wp-content/wflogs/*'
+                                '*/wp-content/debug.log'
+                                '*/error_log'
+                                '*/*.log'
+                                '*/.git/*'
+                                '*/.svn/*'
+                                '*/node_modules/*'
+                                '*/.DS_Store'
+                                '*/Thumbs.db'
+                            )
                         fi
                     fi
                 fi
@@ -1147,6 +1281,299 @@ function show_project_data_size() {
     echo
 }
 
+# Führt umfassende Pre-Backup & Sicherheitsprüfungen für ein Projekt durch
+# Prüft WordPress Debug-Status, Debug-Logs, PHP-Logs, Upload-Sicherheit/Webshells und DB-Erreichbarkeit
+function run_pre_backup_checks() {
+    local project_env_file="$1"
+    local log_target="${2:-}"
+    local p_name
+    p_name="$(project_name_from_env_file "$project_env_file")"
+
+    # shellcheck source=/dev/null
+    source "$project_env_file"
+
+    local p_basis="${PROJEKT_BASIS_DATEINAME:-$p_name}"
+    local p_src="$SOURCE_FILES_DIR"
+
+    local check_ok_count=0
+    local check_warn_count=0
+    local check_alert_count=0
+
+    echo
+    echo "=================================================="
+    echo "Pre-Backup & System-Status Check: '$p_name'"
+    echo "=================================================="
+    if [ -n "$log_target" ] && [ -f "$log_target" ]; then
+        echo >> "$log_target"
+        echo "==================================================" >> "$log_target"
+        echo "Pre-Backup & System-Status Check: '$p_name'" >> "$log_target"
+        echo "==================================================" >> "$log_target"
+    fi
+
+    # 1. Festplattenspeicher-Prüfung
+    if command -v df >/dev/null 2>&1; then
+        local available_kb
+        available_kb=$(df -Pk "$basename" 2>/dev/null | awk 'NR==2 {print $4}')
+        if [ -n "$available_kb" ] && [ "$available_kb" -eq "$available_kb" ] 2>/dev/null; then
+            local avail_mb=$((available_kb / 1024))
+            if [ "$avail_mb" -lt 500 ]; then
+                log_check_item "ALERT" "Speicherplatz kritisch: nur noch ${avail_mb} MB frei auf Ziellaufwerk!" "$log_target" "Festplatte könnte während der Sicherung volllaufen."
+                check_alert_count=$((check_alert_count + 1))
+            elif [ "$avail_mb" -lt 2048 ]; then
+                log_check_item "WARN" "Speicherplatz knapp: ${avail_mb} MB frei auf Ziellaufwerk." "$log_target" "Ausreichend für kleine Backups, bei großen Medienordnern überwachen."
+                check_warn_count=$((check_warn_count + 1))
+            else
+                local avail_gb
+                avail_gb=$(awk "BEGIN {printf \"%.1f\", $avail_mb/1024}")
+                log_check_item "OK" "Festplattenspeicher ausreichend (${avail_gb} GB frei auf Ziellaufwerk)" "$log_target"
+                check_ok_count=$((check_ok_count + 1))
+            fi
+        fi
+    fi
+
+    # 2. Website-Quellordner Prüfung
+    if [ -n "$p_src" ]; then
+        if [ ! -d "$p_src" ]; then
+            log_check_item "ALERT" "Website-Quellordner nicht gefunden: '$p_src'" "$log_target" "Pfad in .env.$p_name existiert nicht."
+            check_alert_count=$((check_alert_count + 1))
+        elif [ ! -r "$p_src" ]; then
+            log_check_item "ALERT" "Website-Quellordner nicht lesbar (fehlende Dateirechte): '$p_src'" "$log_target"
+            check_alert_count=$((check_alert_count + 1))
+        else
+            log_check_item "OK" "Website-Quellordner existiert und ist lesbar: '$p_src'" "$log_target"
+            check_ok_count=$((check_ok_count + 1))
+        fi
+    fi
+
+    # 3. WordPress-Prüfung (falls WordPress vorhanden)
+    local wp_config_candidate=""
+    if [ -n "$p_src" ] && [ -d "$p_src" ]; then
+        for wp_cand in "$p_src/wp-config.php" "$p_src/public_html/wp-config.php" "$p_src/htdocs/wp-config.php" "$p_src/wordpress/wp-config.php" "$(dirname "$p_src")/wp-config.php"; do
+            if [ -f "$wp_cand" ]; then
+                wp_config_candidate="$wp_cand"
+                break
+            fi
+        done
+    fi
+
+    if [ -n "$wp_config_candidate" ] && [ -f "$wp_config_candidate" ]; then
+        parse_wp_config_file "$wp_config_candidate"
+        local wp_root_dir
+        wp_root_dir="$(dirname "$wp_config_candidate")"
+        [ ! -d "$wp_root_dir/wp-content" ] && [ -d "$p_src/wp-content" ] && wp_root_dir="$p_src"
+
+        # WordPress Version
+        local wp_version_file="$wp_root_dir/wp-includes/version.php"
+        local wp_ver=""
+        if [ -f "$wp_version_file" ]; then
+            wp_ver=$(sed -n "s/^[[:space:]]*\$wp_version[[:space:]]*=[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" "$wp_version_file" 2>/dev/null | head -n 1)
+        fi
+        log_check_item "INFO" "WordPress erkannt in '$wp_root_dir'${wp_ver:+ (Version: $wp_ver)}" "$log_target"
+
+        # a) WP_DEBUG
+        local is_debug="${WP_PARSED_DEBUG:-false}"
+        if [ "$is_debug" == "true" ] || [ "$is_debug" == "1" ]; then
+            log_check_item "WARN" "WP_DEBUG ist AKTIVIERT (nicht empfohlen für den Produktivbetrieb)" "$log_target" "Vor Updates und im laufenden Betrieb deaktivieren, um Log-Überlauf zu vermeiden."
+            check_warn_count=$((check_warn_count + 1))
+        else
+            log_check_item "OK" "WP_DEBUG ist deaktiviert (Produktionsmodus aktiv)" "$log_target"
+            check_ok_count=$((check_ok_count + 1))
+        fi
+
+        # b) WP_DEBUG_DISPLAY
+        local is_display="${WP_PARSED_DEBUG_DISPLAY:-false}"
+        if [ "$is_display" == "true" ] || [ "$is_display" == "1" ]; then
+            log_check_item "ALERT" "WP_DEBUG_DISPLAY ist AKTIVIERT!" "$log_target" "PHP-Fehlermeldungen und interne Pfade werden öffentlich im Browser für Besucher angezeigt!"
+            check_alert_count=$((check_alert_count + 1))
+        else
+            log_check_item "OK" "WP_DEBUG_DISPLAY ist deaktiviert (keine Fehlerausgabe an Besucher)" "$log_target"
+            check_ok_count=$((check_ok_count + 1))
+        fi
+
+        # c) WP_DEBUG_LOG & debug.log Datei
+        local is_debug_log="${WP_PARSED_DEBUG_LOG:-false}"
+        local debug_log_path="$wp_root_dir/wp-content/debug.log"
+        if [ "$is_debug_log" != "false" ] && [ "$is_debug_log" != "0" ] && [ -n "$is_debug_log" ] && [ "$is_debug_log" != "true" ] && [ "$is_debug_log" != "1" ]; then
+            debug_log_path="$is_debug_log"
+        fi
+
+        if [ -f "$debug_log_path" ]; then
+            local dlog_size
+            dlog_size=$(du -h "$debug_log_path" 2>/dev/null | awk '{print $1}')
+            local dlog_kb
+            dlog_kb=$(du -k "$debug_log_path" 2>/dev/null | awk '{print $1}')
+            dlog_kb=${dlog_kb:-0}
+
+            if [ "$dlog_kb" -gt 10240 ]; then # > 10 MB
+                log_check_item "ALERT" "wp-content/debug.log existiert und ist SEHR GROSS (${dlog_size:-${dlog_kb}KB})!" "$log_target" "Enthält viele akkumulierte PHP-Fehler; sollte vor/nach Updates geprüft und geleert werden."
+                check_alert_count=$((check_alert_count + 1))
+            else
+                log_check_item "WARN" "wp-content/debug.log existiert (${dlog_size:-${dlog_kb}KB})" "$log_target" "Fehlerprotokolle vor Updates kurz sichten."
+                check_warn_count=$((check_warn_count + 1))
+            fi
+        else
+            log_check_item "OK" "Keine wp-content/debug.log Datei vorhanden (sauber)" "$log_target"
+            check_ok_count=$((check_ok_count + 1))
+        fi
+
+        # d) PHP error_log Dateien
+        local found_error_logs=()
+        for elog in "$wp_root_dir/error_log" "$wp_root_dir/wp-admin/error_log" "$wp_root_dir/php_error.log"; do
+            if [ -f "$elog" ] && [ -s "$elog" ]; then
+                local el_size
+                el_size=$(du -h "$elog" 2>/dev/null | awk '{print $1}')
+                found_error_logs+=("$(basename "$(dirname "$elog")")/$(basename "$elog") (${el_size})")
+            fi
+        done
+        if [ "${#found_error_logs[@]}" -gt 0 ]; then
+            log_check_item "WARN" "PHP error_log Datei(en) gefunden: ${found_error_logs[*]}" "$log_target" "Enthält Server- oder Script-Fehler."
+            check_warn_count=$((check_warn_count + 1))
+        else
+            log_check_item "OK" "Keine PHP error_log Dateien in Hauptordnern" "$log_target"
+            check_ok_count=$((check_ok_count + 1))
+        fi
+
+        # e) Wartungsmodus (.maintenance)
+        if [ -f "$wp_root_dir/.maintenance" ]; then
+            log_check_item "WARN" "Wartungsmodus (.maintenance) ist aktiv!" "$log_target" "Website zeigt aktuell 'Briefly unavailable for scheduled maintenance'."
+            check_warn_count=$((check_warn_count + 1))
+        else
+            log_check_item "OK" "Kein aktiver Wartungsmodus (.maintenance)" "$log_target"
+            check_ok_count=$((check_ok_count + 1))
+        fi
+
+        # f) Rudimentärer Sicherheits- / Hack-Check
+        # 1. PHP-Dateien im Upload-Ordner
+        local uploads_dir="$wp_root_dir/wp-content/uploads"
+        if [ -d "$uploads_dir" ]; then
+            local susp_php_files=()
+            while IFS= read -r f; do
+                [ -n "$f" ] && susp_php_files+=("$f")
+            done < <(find "$uploads_dir" -maxdepth 5 -type f \( -name "*.php" -o -name "*.phtml" -o -name "*.php5" -o -name "*.php7" -o -name "*.phps" -o -name "*.suspected" \) 2>/dev/null | head -n 10)
+
+            if [ "${#susp_php_files[@]}" -gt 0 ]; then
+                local num_susp=${#susp_php_files[@]}
+                local sample_names=""
+                for sf in "${susp_php_files[@]:0:3}"; do
+                    sample_names+="$(basename "$sf"), "
+                done
+                sample_names="${sample_names%, }"
+                log_check_item "ALERT" "Verdächtige PHP-Dateien im Uploads-Ordner gefunden (${num_susp} Datei(en): ${sample_names})!" "$log_target" "Uploads sollten keine PHP-Dateien enthalten (Malware / Webshell-Gefahr!)."
+                check_alert_count=$((check_alert_count + 1))
+            else
+                log_check_item "OK" "Upload-Ordner (wp-content/uploads) ist frei von verdächtigen PHP-Skripten" "$log_target"
+                check_ok_count=$((check_ok_count + 1))
+            fi
+        fi
+
+        # 2. Obfuskierter Code in Kern-Dateien (wp-config.php / index.php)
+        local susp_code_found=0
+        for core_file in "$wp_config_candidate" "$wp_root_dir/index.php"; do
+            if [ -f "$core_file" ]; then
+                if grep -Eiq '(eval|assert)[[:space:]]*\([[:space:]]*(base64_decode|gzinflate|gzuncompress|str_rot13|\$_POST|\$_GET|\$_COOKIE|\$_REQUEST)' "$core_file" 2>/dev/null; then
+                    log_check_item "ALERT" "Verdächtiges Verschleierungsmuster (eval/base64/assert) in '$(basename "$core_file")' gefunden!" "$log_target" "Hoher Verdacht auf Backdoor / Schadcode."
+                    susp_code_found=1
+                    check_alert_count=$((check_alert_count + 1))
+                fi
+            fi
+        done
+        if [ "$susp_code_found" -eq 0 ]; then
+            log_check_item "OK" "Kern-Dateien (wp-config.php, index.php) zeigen keine auffälligen Verschleierungsmuster" "$log_target"
+            check_ok_count=$((check_ok_count + 1))
+        fi
+
+        # 3. Versteckte PHP-Dateien im Webroot
+        local hidden_php_files=()
+        while IFS= read -r hf; do
+            [ -n "$hf" ] && hidden_php_files+=("$(basename "$hf")")
+        done < <(find "$wp_root_dir" -maxdepth 2 -type f -name ".*.php" 2>/dev/null | head -n 5)
+        if [ "${#hidden_php_files[@]}" -gt 0 ]; then
+            log_check_item "WARN" "Versteckte PHP-Dateien gefunden: ${hidden_php_files[*]}" "$log_target" "Versteckte Skripte sollten auf Legitimität geprüft werden."
+            check_warn_count=$((check_warn_count + 1))
+        fi
+    fi
+
+    # 4. Datenbank-Verbindungsprüfung
+    local check_db_hosts=()
+    local check_db_names=()
+    local check_db_users=()
+    local check_db_passwords=()
+    if [ -n "$DB_COUNT" ]; then
+        for ((chk_i=1; chk_i<=DB_COUNT; chk_i++)); do
+            local h_var="DB_${chk_i}_HOST"
+            local n_var="DB_${chk_i}_NAME"
+            local u_var="DB_${chk_i}_USER"
+            local p_var="DB_${chk_i}_PASSWORD"
+            check_db_hosts+=("${!h_var}")
+            check_db_names+=("${!n_var}")
+            check_db_users+=("${!u_var}")
+            check_db_passwords+=("${!p_var}")
+        done
+    elif [ -n "$DB_NAME" ]; then
+        check_db_hosts+=("${DB_HOST:-localhost}")
+        check_db_names+=("$DB_NAME")
+        check_db_users+=("$DB_USER")
+        check_db_passwords+=("$DB_PASSWORD")
+    fi
+
+    if [ "${#check_db_names[@]}" -gt 0 ] && command -v mysql >/dev/null 2>&1; then
+        for ((chk_d=0; chk_d<${#check_db_names[@]}; chk_d++)); do
+            local cur_h="${check_db_hosts[$chk_d]}"
+            local cur_n="${check_db_names[$chk_d]}"
+            local cur_u="${check_db_users[$chk_d]}"
+            local cur_p="${check_db_passwords[$chk_d]}"
+
+            local cur_h_clean="${cur_h%%:*}"
+            local cur_port="${cur_h#*:}"
+            local cur_port_arg=()
+            [ "$cur_port" != "$cur_h" ] && [ -n "$cur_port" ] && cur_port_arg=("-P$cur_port")
+
+            local tbl_count
+            tbl_count=$(MYSQL_PWD="$cur_p" mysql -h"$cur_h_clean" "${cur_port_arg[@]}" -u"$cur_u" "$cur_n" --connect-timeout=3 -s -N -e "SELECT count(*) FROM information_schema.tables WHERE table_schema = '$cur_n';" 2>/dev/null)
+            local mysql_ping_status=$?
+
+            if [ "$mysql_ping_status" -eq 0 ] && [ -n "$tbl_count" ]; then
+                log_check_item "OK" "Datenbank '$cur_n' auf '$cur_h' erreichbar ($tbl_count Tabellen vorhanden)" "$log_target"
+                check_ok_count=$((check_ok_count + 1))
+            else
+                log_check_item "ALERT" "Datenbank-Verbindung zu '$cur_n' ($cur_h) FEHLGESCHLAGEN!" "$log_target" "Zugangsdaten in .env prüfen oder MySQL-Server nicht erreichbar."
+                check_alert_count=$((check_alert_count + 1))
+            fi
+        done
+    fi
+
+    echo "--------------------------------------------------"
+    if [ -n "$log_target" ] && [ -f "$log_target" ]; then
+        echo "--------------------------------------------------" >> "$log_target"
+    fi
+
+    # Zusammenfassungs-Meldung
+    if [ "$check_alert_count" -gt 0 ]; then
+        printf "  %bFazit: %d kritische Warnung(en)%b, %d Hinweis(e), %d OK.\n" "${CLR_RED}${CLR_BOLD}" "$check_alert_count" "${CLR_RESET}" "$check_warn_count" "$check_ok_count"
+        printf "  %b-> Bitte die rot markierten Punkte vor dem Update oder Backup prüfen!%b\n" "${CLR_RED}" "${CLR_RESET}"
+        if [ -n "$log_target" ] && [ -f "$log_target" ]; then
+            printf "  Fazit: %d kritische Warnung(en), %d Hinweis(e), %d OK.\n" "$check_alert_count" "$check_warn_count" "$check_ok_count" >> "$log_target"
+        fi
+    elif [ "$check_warn_count" -gt 0 ]; then
+        printf "  %bFazit: %d Hinweis(e)/Warnung(en)%b, %d OK.\n" "${CLR_YELLOW}${CLR_BOLD}" "$check_warn_count" "${CLR_RESET}" "$check_ok_count"
+        printf "  %b-> Alles bereit, aber gelbe Hinweise vor Updates beachten.%b\n" "${CLR_YELLOW}" "${CLR_RESET}"
+        if [ -n "$log_target" ] && [ -f "$log_target" ]; then
+            printf "  Fazit: %d Hinweis(e)/Warnung(en), %d OK.\n" "$check_warn_count" "$check_ok_count" >> "$log_target"
+        fi
+    else
+        printf "  %bFazit: Alle %d Prüfungen bestanden! Alles im grünen Bereich.%b\n" "${CLR_GREEN}${CLR_BOLD}" "$check_ok_count" "${CLR_RESET}"
+        if [ -n "$log_target" ] && [ -f "$log_target" ]; then
+            printf "  Fazit: Alle %d Prüfungen bestanden! Alles im grünen Bereich.\n" "$check_ok_count" >> "$log_target"
+        fi
+    fi
+    echo "=================================================="
+    echo
+    if [ -n "$log_target" ] && [ -f "$log_target" ]; then
+        echo "==================================================" >> "$log_target"
+        echo >> "$log_target"
+    fi
+}
+
 # Fragt interaktiv ab, was gesichert werden soll (Standard/db/dateien/alles) und setzt cli_scope entsprechend.
 # Wird vom Hauptmenü vor dem eigentlichen Backup aufgerufen, damit der Umfang bei jedem
 # manuellen Lauf bewusst gewählt werden kann, statt stillschweigend den gespeicherten
@@ -1189,9 +1616,10 @@ function run_main_menu() {
         echo "  2) Alle Projekte sichern"
         echo "  3) Neues Projekt einrichten"
         echo "  4) WordPress-Installationen suchen & einrichten"
-        echo "  5) Datenbank wiederherstellen"
-        echo "  6) Projekt-Datengröße anzeigen"
-        echo "  7) Projektübersicht anzeigen"
+        echo "  5) Pre-Check & Sicherheitsstatus prüfen"
+        echo "  6) Datenbank wiederherstellen"
+        echo "  7) Projekt-Datengröße anzeigen"
+        echo "  8) Projektübersicht anzeigen"
         echo "  0) Beenden"
         echo "======================================"
         read -rp "Auswahl: " menu_choice
@@ -1221,13 +1649,39 @@ function run_main_menu() {
                 refresh_env_files
                 ;;
             5)
+                if [ "${#env_files[@]}" -eq 1 ]; then
+                    run_pre_backup_checks "${env_files[0]}"
+                else
+                    echo "======================================"
+                    echo "Für welches Projekt sollen die Pre-Checks durchgeführt werden?"
+                    local chk_idx=1
+                    local existing_env_file
+                    for existing_env_file in "${env_files[@]}"; do
+                        echo "  $chk_idx) $(project_name_from_env_file "$existing_env_file")"
+                        chk_idx=$((chk_idx + 1))
+                    done
+                    echo "  a) alle Projekte"
+                    echo "======================================"
+                    read -rp "Projekt auswählen (Nummer oder 'a'): " chk_choice
+                    if [ "$chk_choice" == "a" ]; then
+                        for existing_env_file in "${env_files[@]}"; do
+                            run_pre_backup_checks "$existing_env_file"
+                        done
+                    elif [ -n "$chk_choice" ] && [ "$chk_choice" -ge 1 ] 2>/dev/null && [ "$chk_choice" -le "${#env_files[@]}" ] 2>/dev/null; then
+                        run_pre_backup_checks "${env_files[$((chk_choice - 1))]}"
+                    else
+                        echo "Ungültige Auswahl." >&2
+                    fi
+                fi
+                ;;
+            6)
                 restore_mode='true'
                 return 0
                 ;;
-            6)
+            7)
                 show_project_data_size
                 ;;
-            7)
+            8)
                 show_project_overview
                 ;;
             0)
@@ -1334,6 +1788,53 @@ if [ "$restore_mode" == "true" ]; then
     exit $?
 fi
 
+# Check-Modus (--check / --pre-check): Pre-Checks & Sicherheitsstatus für Projekt(e) ausführen
+if [ "$check_mode" == "true" ]; then
+    if [ "$cli_project" == "alle" ]; then
+        for chk_env in "${env_files[@]}"; do
+            run_pre_backup_checks "$chk_env"
+        done
+    else
+        chk_target_env=''
+        if [ -n "$cli_project" ]; then
+            match_env_file="$basename/.env.$cli_project"
+            if [ "$cli_project" == "default" ] && [ -f "$legacy_env_file" ]; then
+                chk_target_env="$legacy_env_file"
+            elif [ -f "$match_env_file" ]; then
+                chk_target_env="$match_env_file"
+            else
+                echo "Kein Projekt '$cli_project' gefunden." >&2
+                exit 1
+            fi
+        elif [ "${#env_files[@]}" -eq 1 ]; then
+            chk_target_env="${env_files[0]}"
+        else
+            echo "======================================"
+            echo "Für welches Projekt sollen Pre-Checks durchgeführt werden?"
+            project_index=1
+            for existing_env_file in "${env_files[@]}"; do
+                echo "  $project_index) $(project_name_from_env_file "$existing_env_file")"
+                project_index=$((project_index + 1))
+            done
+            echo "  a) alle Projekte"
+            echo "======================================"
+            read -rp "Projekt auswählen (Nummer oder 'a' für alle): " chk_choice
+            if [ "$chk_choice" == "a" ]; then
+                for existing_env_file in "${env_files[@]}"; do
+                    run_pre_backup_checks "$existing_env_file"
+                done
+                exit 0
+            else
+                selected_index=$((chk_choice - 1))
+                chk_target_env="${env_files[$selected_index]}"
+            fi
+        fi
+
+        [ -n "$chk_target_env" ] && run_pre_backup_checks "$chk_target_env"
+    fi
+    exit 0
+fi
+
 # Projekt(e) auswählen, die in diesem Lauf verarbeitet werden sollen
 selected_env_files=()
 if [ "$cli_project" == "alle" ]; then
@@ -1394,13 +1895,36 @@ function backup_db() {
     if [ "$db_name" != "" ]
     then
         echo "Sichern der Datenbank '$db_name' in Datei $sql_file ..." | tee -a "$log_file_name"
+        
+        local mysqldump_opts=(
+            "--single-transaction"
+            "--quick"
+            "--routines"
+            "--triggers"
+            "--skip-lock-tables"
+            "--max_allowed_packet=512M"
+            "--default-character-set=utf8mb4"
+        )
+
+        # Optionale Flags prüfen (MySQL 8 / Cloud DB Kompatibilität)
+        if mysqldump --help 2>&1 | grep -q -- "--column-statistics"; then
+            mysqldump_opts+=("--column-statistics=0")
+        fi
+        if mysqldump --help 2>&1 | grep -q -- "--set-gtid-purged"; then
+            mysqldump_opts+=("--set-gtid-purged=OFF")
+        fi
+
+        local db_host_clean="${db_host%%:*}"
+        local db_port="${db_host#*:}"
+        local port_args=()
+        if [ "$db_port" != "$db_host" ] && [ -n "$db_port" ]; then
+            port_args=("-P$db_port")
+        fi
+
         MYSQL_PWD="$db_password" mysqldump \
-            --single-transaction \
-            --quick \
-            --routines \
-            --triggers \
-            --skip-lock-tables \
-            -h"$db_host" \
+            "${mysqldump_opts[@]}" \
+            -h"$db_host_clean" \
+            "${port_args[@]}" \
             -u"$db_user" \
             "$db_name" > "$sql_file" 2>> "$log_file_name"
         local dump_status=$?
@@ -1595,8 +2119,8 @@ function run_backup_for_project() {
     echo | tee -a "$log_file_name"
     echo
 
-    # Freien Festplattenspeicher prüfen
-    check_disk_space "$backup_destiantion" "$log_file_name"
+    # Pre-Backup Prüfungen & Sicherheits-Check ausführen
+    run_pre_backup_checks "$project_env_file" "$log_file_name"
 
     # Datenbanken sichern (beliebig viele), nur wenn Umfang alles oder db
     if [ "$run_scope" == "alles" ] || [ "$run_scope" == "db" ]; then
@@ -1625,10 +2149,10 @@ function run_backup_for_project() {
                 if [ "${#source_files_dir_ignore[@]}" -gt "0" ] && [ "${source_files_dir_ignore[0]}" != "" ]
                 then
                     echo " ausgeschlossene(r) Ordner: ${source_files_dir_ignore[*]}" | tee -a "$log_file_name"
-                    zip -rq "$zip_target" "$source_files_dir" -x "${source_files_dir_ignore[@]}" 2>> "$log_file_name"
+                    zip -rq -y "$zip_target" "$source_files_dir" -x "${source_files_dir_ignore[@]}" 2>> "$log_file_name"
                     zip_files_status=$?
                 else
-                    zip -rq "$zip_target" "$source_files_dir" 2>> "$log_file_name"
+                    zip -rq -y "$zip_target" "$source_files_dir" 2>> "$log_file_name"
                     zip_files_status=$?
                 fi
                 if [ "$zip_files_status" -eq 0 ] || [ "$zip_files_status" -eq 12 ]; then

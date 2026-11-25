@@ -15,10 +15,16 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
   - **Selbstinstallation & WP-CLI:** Automatische Erkennung oder Download von WP-CLI nach `./bin/wp-cli.phar` mit SHA-512 Hash-Prüfung und `--update-wpcli`.
   - **Vorprüfungen (Pre-Check):** Verifikation von `wp core is-installed`, Abwesenheit von `.maintenance`, HTTP-Status 200 und Vorhandensein von `MUST_CONTAIN` auf der Startseite. Bricht bei Vorschäden sofort sicher ab (ROT).
   - **Backup-Sicherheitsnetz:** Automatischer Aufruf von `backup_full_db_files_zip.sh` vor jedem Update. Fortsetzung nur bei erfolgreichem, verifiziertem Backup.
+  - **Visuelle Regressionsprüfung (Screenshot-Vergleich):**
+    - Vorher- und Nachher-Screenshots der Startseite, der konfigurierten `CHECK_PATHS` und zufälliger Seiten aus XML-Sitemaps (`/wp-sitemap.xml`, `/sitemap_index.xml`).
+    - Automatischer Bildvergleich mit ImageMagick (`compare`), PHP-GD oder Dateigrößen-Heuristik inkl. Generierung von visuellen Differenzbildern in `update-runs/<projekt>/<datum>/screenshots/`.
+    - Ampel-Kriterien: $< 5\,\%$ = GRÜN, $5 - 20\,\%$ = GELB, $> 20\,\%$ / Fehler = ROT.
+    - Vollständig konfigurierbar und überspringbar (`ENABLE_SCREENSHOTS="no"` oder `--no-screenshots`).
+    - Tool-Erkennung beim Setup mit Hinweisen zur Installation von ImageMagick / `php-gd`.
   - **Umfassender Post-Check:** Prüfung von `wp core verify-checksums`, Versions-Diffs, Log-Analyse auf Fatal Errors, HTTP-Status 200 und Antwortzeitvergleich.
   - **Ampel-System & Exit-Codes:** 0 = GRÜN (Erfolg), 1 = GELB (Warnungen/Verlangsamung), 2 = ROT (Fehler/Abbruch).
   - **Automatisches Rollback-Skript:** Generierung von `update-runs/<projekt>/<datum>/rollback.sh` mit gezielten Downgrade-Befehlen und Restore-Anleitung.
-  - **Interaktives Menü & CLI-Parameter:** `--project=`, `--dry-run`, `--no-backup`, `--only=`, `--setup`, `--update-wpcli`, `--json`, `--help`.
+  - **Interaktives Menü & CLI-Parameter:** `--project=`, `--dry-run`, `--no-backup`, `--no-screenshots`, `--only=`, `--setup`, `--update-wpcli`, `--json`, `--help`.
 - **Selbstprüfung für Backups (`verify_backup` in `backup_full_db_files_zip.sh`):**
   - Jede erzeugte ZIP-Datei wird vor der Übertragung oder Löschung mit `unzip -tq` getestet.
   - Datenbank-Dumps werden auf mysqldump-Header, `-- Dump completed`-Abschluss und (bei WordPress) auf die Tabellen `<prefix>options` und `<prefix>posts` validiert.

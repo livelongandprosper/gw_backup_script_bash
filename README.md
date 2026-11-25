@@ -88,17 +88,36 @@ Neues Skript zur sicheren Durchführung von WordPress Core-, Plugin-, Theme- und
   3. **Backup-Pflicht**: Führt vor dem Update `./backup_full_db_files_zip.sh --project=<name> --scope=alles --json` aus. Fortsetzung nur bei Exitcode 0 oder 1 (mit verifizierten Dateien). Bei `--no-backup` wird ein vorhandenes Backup verlangt, das jünger als `BACKUP_MAX_AGE_MIN` (Standard: 60 Min) und Status "ok" ist
   4. **Stand vorher sichern**: Core-Version, Plugin-/Theme-Listen (`--format=json`), Zeilenzahlen der Logs und HTTP-Antwortzeiten werden in `update-runs/<projekt>/<datum>/` archiviert
   5. **Updates**: Core, Core-DB, Plugins (unter Ausschluss von `SKIP_PLUGINS`), Themes, Sprachen und Cache-Flush. Ein Einzelfehler stoppt Folgeschritte nicht
-  6. **Nachprüfung (Post-Check)**: `wp core verify-checksums`, Plugin-/Theme-Versionsdiff, Prüfung auf neue Log-Zeilen und Fatal Errors, HTTP-Status 200, `MUST_CONTAIN`, Fehlertext-Erkennung und Antwortzeit-Vergleich
+  6. **Nachprüfung (Post-Check)**:
+     - `wp core verify-checksums`
+     - Plugin- und Theme-Versionsdiff
+     - Log-Analyse auf neue Zeilen und Fatal Errors
+     - HTTP-Status 200, `MUST_CONTAIN` und Fehlertext-Erkennung auf allen Prüfseiten
+     - Antwortzeit-Vergleich (> 2× Verlangsamung erzeugt Warnung)
+     - **Visuelle Regressionsprüfung (Screenshot-Vergleich)**:
+       - Vor und nach dem Update werden Screenshots der Startseite, der konfigurierten `CHECK_PATHS` sowie $N$ zufälliger Unterseiten aus der Sitemap (z. B. `/wp-sitemap.xml` oder `/sitemap_index.xml`) erstellt.
+       - Automatischer Bildvergleich via ImageMagick (`compare`), PHP-GD oder Dateigrößen-Heuristik.
+       - Differenzbilder werden in `update-runs/<projekt>/<datum>/screenshots/` gespeichert (z. B. `page_0_diff.png`).
+       - Abweichung $< 5\,\%$ = GRÜN, $5 - 20\,\%$ = GELB (Warnung), $> 20\,\%$ oder Render-Fehler = ROT (Kritischer Fehler / Layout gebrochen).
+       - Kann bei Bedarf übersprungen werden via `--no-screenshots` oder `ENABLE_SCREENSHOTS="no"` in `.update.<projekt>`.
   7. **Ampel-Status & Exit-Codes**:
      - **GRÜN (0)**: Alle Updates und Prüfungen bestanden
-     - **GELB (1)**: Einzelne Updates übersprungen/fehlgeschlagen, neue Notices/Warnungen im Log oder Antwortzeit > 2× verlangsamt
-     - **ROT (2)**: Backup nicht OK, HTTP ≠ 200, Fatal Error, Checksummen falsch oder `core update-db` fehlgeschlagen
+     - **GELB (1)**: Einzelne Updates übersprungen/fehlgeschlagen, neue Notices/Warnungen im Log, visuelle Abweichung 5–20 % oder Antwortzeit > 2× verlangsamt
+     - **ROT (2)**: Backup nicht OK, HTTP ≠ 200, Fatal Error, Checksummen falsch, visuelle Abweichung > 20 % oder `core update-db` fehlgeschlagen
   8. **Automatisches Rollback-Skript**:
      - erzeugt `update-runs/<projekt>/<datum>/rollback.sh` mit exakten Downgrade-Befehlen für alle geänderten Plugins/Themes/Core sowie Hinweisen zum Restore via `backup_full_db_files_zip.sh --restore`
 - **Parameter & Menü**:
   - Ohne Parameter: Interaktives Hauptmenü (Projekt aktualisieren, alle, Dry-Run, Setup, letzte Läufe, Rollback-Befehle)
-  - CLI: `--project=`, `--dry-run`, `--no-backup`, `--only=core|plugins|themes|languages`, `--setup`, `--update-wpcli`, `--json`, `--help`
+  - CLI: `--project=`, `--dry-run`, `--no-backup`, `--no-screenshots`, `--only=core|plugins|themes|languages`, `--setup`, `--update-wpcli`, `--json`, `--help`
   - Automatische Bereinigung von Update-Runs älter als 90 Tage
+
+### Empfohlene Software für visuelle Prüfungen ###
+Für die visuelle Regressionsprüfung wird eines der folgenden Werkzeuge empfohlen:
+- **ImageMagick CLI** (`compare` oder `magick compare`): Ideal für pixelgenaue RMSE-Metriken und Differenzbilder.
+  *(Installation z. B. via `apt-get install imagemagick` oder `brew install imagemagick`)*
+- **PHP mit GD-Erweiterung** (`php-gd`): Portabler Fallback ohne CLI-Binaries.
+  *(Installation z. B. via `apt-get install php-gd`)*
+- *Hinweis:* Ist keines dieser Werkzeuge vorhanden, warnt das Skript beim Setup und nutzt eine Dateigrößen-Heuristik, oder die Prüfung kann in `.update.<projekt>` (`ENABLE_SCREENSHOTS="no"`) bzw. per CLI (`--no-screenshots`) übersprungen werden.
 
 ### Einrichtung / Zugangsdaten ###
 Das Skript kann für beliebig viele Projekte im selben Ordner verwendet werden. Jedes

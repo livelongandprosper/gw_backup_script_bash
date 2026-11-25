@@ -53,6 +53,7 @@ before=$(date +%s)
 cli_project=''
 cli_dry_run='false'
 cli_no_backup='false'
+cli_no_screenshots='false'
 cli_only=''
 cli_setup='false'
 cli_update_wpcli='false'
@@ -69,6 +70,9 @@ for cli_arg in "$@"; do
             ;;
         --no-backup)
             cli_no_backup='true'
+            ;;
+        --no-screenshots|--skip-screenshots)
+            cli_no_screenshots='true'
             ;;
         --only=*)
             cli_only="${cli_arg#*=}"
@@ -98,6 +102,7 @@ if [ "$cli_help" == "true" ]; then
     echo "  --project=<name>|alle   Aktualisiert das angegebene Projekt (.update.<name>) oder alle."
     echo "  --dry-run               Prüft verfügbare Updates und Vorbedingungen, ändert nichts."
     echo "  --no-backup             Überspringt das automatische Backup (nutzt letztes Backup aus status/)."
+    echo "  --no-screenshots        Überspringt den visuellen Screenshot-Vergleich (Regression-Testing)."
     echo "  --only=<bereich>        Nur bestimmte Updates ausführen: core | plugins | themes | languages"
     echo "  --setup                 Startet den interaktiven Einrichtungsassistenten für .update-Dateien."
     echo "  --update-wpcli          Aktualisiert die lokale WP-CLI (./bin/wp-cli.phar) auf die neueste Version."
@@ -687,6 +692,9 @@ function write_project_update_file() {
     local skip_plugins="$7"
     local max_age="${8:-60}"
     local backup_first="${9:-yes}"
+    local enable_screenshots="${10:-yes}"
+    local screenshot_pages_count="${11:-3}"
+    local screenshot_method="${12:-mshots}"
 
     cat <<EOF > "$target_file"
 # update_wp.sh Konfigurationsdatei für Projekt '$p_name'
@@ -695,7 +703,7 @@ function write_project_update_file() {
 # Absoluter oder relativer Pfad zum WordPress-Wurzelverzeichnis
 WP_PATH="$wp_path"
 
-# Öffentliche URL der Website (für HTTP-Prüfungen)
+# Öffentliche URL der Website (für HTTP- und Screenshot-Prüfungen)
 SITE_URL="$site_url"
 
 # Text / Schlagwort, das auf der Startseite zwingend vorhanden sein muss (z. B. Blogname / Firmentitel)
@@ -712,6 +720,15 @@ BACKUP_MAX_AGE_MIN="$max_age"
 
 # Vor dem Update automatisch ein vollständiges Backup via backup_full_db_files_zip.sh ausführen (yes/no)
 RUN_BACKUP_FIRST="$backup_first"
+
+# Visuellen Screenshot-Vergleich vor und nach dem Update durchführen (yes/no)
+ENABLE_SCREENSHOTS="$enable_screenshots"
+
+# Anzahl zufälliger Unterseiten aus der Sitemap für den visuellen Screenshot-Vergleich (Standard: 3)
+SCREENSHOT_PAGES_COUNT="$screenshot_pages_count"
+
+# Methode zur Screenshot-Erstellung (mshots = WordPress/Automattic Dienst, local = headless browser)
+SCREENSHOT_METHOD="$screenshot_method"
 EOF
     chmod 600 "$target_file" 2>/dev/null || true
 }
@@ -726,6 +743,7 @@ function run_setup_wizard() {
     check_required_tools || return 1
     check_php_cli || return 1
     ensure_wp_cli || return 1
+    check_screenshot_tools
 
     # Webroot-Schutz für update-runs und bin sicherstellen
     ensure_webroot_protection "$basename/update-runs" "deny_all"
@@ -771,6 +789,9 @@ function run_setup_wizard() {
         local current_skip_plugins=""
         local current_max_age="60"
         local current_backup_first="yes"
+        local current_enable_screenshots="yes"
+        local current_screenshot_pages_count="3"
+        local current_screenshot_method="mshots"
 
         # Falls .env vorhanden, SOURCE_FILES_DIR als Pfadvorschlag laden
         if [ -f "$env_cfg" ]; then
@@ -790,6 +811,9 @@ function run_setup_wizard() {
             current_skip_plugins="${SKIP_PLUGINS:-$current_skip_plugins}"
             current_max_age="${BACKUP_MAX_AGE_MIN:-$current_max_age}"
             current_backup_first="${RUN_BACKUP_FIRST:-$current_backup_first}"
+            current_enable_screenshots="${ENABLE_SCREENSHOTS:-$current_enable_screenshots}"
+            current_screenshot_pages_count="${SCREENSHOT_PAGES_COUNT:-$current_screenshot_pages_count}"
+            current_screenshot_method="${SCREENSHOT_METHOD:-$current_screenshot_method}"
         fi
 
         read -rp "WordPress-Pfad (WP_PATH) [${current_wp_path:-../$proj}]: " in_wp_path
@@ -841,7 +865,18 @@ function run_setup_wizard() {
         read -rp "Vor Update immer frisches Backup erstellen? (yes/no) [$current_backup_first]: " in_backup_first
         current_backup_first="${in_backup_first:-$current_backup_first}"
 
-        write_project_update_file "$update_cfg" "$proj" "$current_wp_path" "$current_site_url" "$current_must_contain" "$current_check_paths" "$current_skip_plugins" "$current_max_age" "$current_backup_first"
+        read -rp "Visuellen Screenshot-Vergleich aktivieren? (yes/no) [$current_enable_screenshots]: " in_enable_screenshots
+        current_enable_screenshots="${in_enable_screenshots:-$current_enable_screenshots}"
+
+        if [ "$current_enable_screenshots" == "yes" ]; then
+            read -rp "Anzahl zufälliger Sitemap-Seiten für Screenshot-Vergleich [$current_screenshot_pages_count]: " in_screenshot_pages_count
+            current_screenshot_pages_count="${in_screenshot_pages_count:-$current_screenshot_pages_count}"
+
+            read -rp "Screenshot-Methode (mshots/local) [$current_screenshot_method]: " in_screenshot_method
+            current_screenshot_method="${in_screenshot_method:-$current_screenshot_method}"
+        fi
+
+        write_project_update_file "$update_cfg" "$proj" "$current_wp_path" "$current_site_url" "$current_must_contain" "$current_check_paths" "$current_skip_plugins" "$current_max_age" "$current_backup_first" "$current_enable_screenshots" "$current_screenshot_pages_count" "$current_screenshot_method"
         echo "-> Gespeichert als $update_cfg"
         configured_count=$((configured_count + 1))
     done
@@ -903,6 +938,302 @@ function check_http_endpoint() {
 ################################
 ################################
 ################################
+## Visuelle Regression & Screenshot-Vergleich
+
+# Prüft die Verfügbarkeit von Werkzeugen für den visuellen Screenshot-Vergleich
+function check_screenshot_tools() {
+    local log_target="${1:-/dev/null}"
+    local has_imagemagick=0
+    local has_php_gd=0
+
+    if command -v compare >/dev/null 2>&1 || command -v magick >/dev/null 2>&1; then
+        has_imagemagick=1
+    fi
+
+    if command -v php >/dev/null 2>&1 && php -r 'exit(extension_loaded("gd") ? 0 : 1);' >/dev/null 2>&1; then
+        has_php_gd=1
+    fi
+
+    if [ "$has_imagemagick" -eq 1 ]; then
+        log_check_item "OK" "ImageMagick ('compare'/'magick') für präzisen Bildvergleich verfügbar" "$log_target"
+        return 0
+    elif [ "$has_php_gd" -eq 1 ]; then
+        log_check_item "OK" "PHP-GD Erweiterung für visuellen Pixel-Vergleich verfügbar" "$log_target"
+        return 0
+    else
+        log_check_item "WARN" "Weder ImageMagick noch PHP-GD für visuellen Bildvergleich gefunden" "$log_target" "Für pixelgenaue Differenzbilder wird ImageMagick ('compare') oder die PHP-GD-Erweiterung empfohlen. Ohne diese Tools wird auf Dateigrößen-Heuristik zurückgegriffen oder der Screenshot-Vergleich kann in der Konfiguration deaktiviert werden."
+        return 1
+    fi
+}
+
+# Findet URLs aus WordPress-Sitemaps und wählt eine Zufallsauswahl aus
+function discover_sitemap_urls() {
+    local site_url="$1"
+    local sample_count="${2:-3}"
+
+    [ -z "$site_url" ] && return 0
+    [ "$sample_count" -le 0 ] 2>/dev/null && return 0
+
+    local base_clean="${site_url%/}"
+    local candidate_sitemaps=(
+        "$base_clean/wp-sitemap.xml"
+        "$base_clean/sitemap_index.xml"
+        "$base_clean/sitemap.xml"
+    )
+
+    local raw_sitemap_content=""
+    local found_sitemap_url=""
+
+    for sm_url in "${candidate_sitemaps[@]}"; do
+        local resp=""
+        if command -v curl >/dev/null 2>&1; then
+            resp=$(curl -s -S -L -k --max-time 15 "$sm_url" 2>/dev/null || true)
+        elif command -v wget >/dev/null 2>&1; then
+            resp=$(wget -q -O - --no-check-certificate --timeout=15 "$sm_url" 2>/dev/null || true)
+        fi
+
+        if echo "$resp" | grep -q "<loc>" 2>/dev/null; then
+            raw_sitemap_content="$resp"
+            found_sitemap_url="$sm_url"
+            break
+        fi
+    done
+
+    if [ -z "$raw_sitemap_content" ]; then
+        return 0
+    fi
+
+    # Falls es sich um einen Sitemap-Index handelt (enthält Sub-Sitemaps wie wp-sitemap-posts-page-1.xml oder post-sitemap.xml)
+    if echo "$raw_sitemap_content" | grep -qi "<sitemap>" 2>/dev/null; then
+        local sub_sitemaps=()
+        while IFS= read -r sub_sm; do
+            [ -n "$sub_sm" ] && sub_sitemaps+=("$sub_sm")
+        done < <(echo "$raw_sitemap_content" | grep -oE '<loc>[^<]+</loc>' | sed -e 's/<loc>//g' -e 's/<\/loc>//g' | grep -vE '\.(jpg|png|pdf)$')
+
+        # Bevorzuge Post- oder Page-Sitemaps
+        local chosen_sub=""
+        for candidate_sub in "${sub_sitemaps[@]}"; do
+            if echo "$candidate_sub" | grep -qiE '(post|page|artikel|seite)'; then
+                chosen_sub="$candidate_sub"
+                break
+            fi
+        done
+        [ -z "$chosen_sub" ] && chosen_sub="${sub_sitemaps[0]:-}"
+
+        if [ -n "$chosen_sub" ]; then
+            if command -v curl >/dev/null 2>&1; then
+                raw_sitemap_content=$(curl -s -S -L -k --max-time 15 "$chosen_sub" 2>/dev/null || true)
+            elif command -v wget >/dev/null 2>&1; then
+                raw_sitemap_content=$(wget -q -O - --no-check-certificate --timeout=15 "$chosen_sub" 2>/dev/null || true)
+            fi
+        fi
+    fi
+
+    # URLs extrahieren und filtern
+    local all_urls=()
+    while IFS= read -r url_item; do
+        [ -z "$url_item" ] && continue
+        # Filtere Medien, XML, Feeds und Admin-Pfade heraus
+        if echo "$url_item" | grep -qiE '\.(xml|jpg|jpeg|png|gif|svg|webp|pdf|zip|gz|tar|css|js)$'; then
+            continue
+        fi
+        if echo "$url_item" | grep -qiE '(/feed/|/wp-json/|/wp-admin/|/wp-includes/|/author/)'; then
+            continue
+        fi
+        # Nicht Startseite
+        local url_item_clean="${url_item%/}"
+        if [ "$url_item_clean" == "$base_clean" ]; then
+            continue
+        fi
+        all_urls+=("$url_item")
+    done < <(echo "$raw_sitemap_content" | grep -oE '<loc>[^<]+</loc>' | sed -e 's/<loc>//g' -e 's/<\/loc>//g' | sort -u)
+
+    local total_found=${#all_urls[@]}
+    if [ "$total_found" -eq 0 ]; then
+        return 0
+    fi
+
+    # Zufällige Auswahl treffen (portable Auswahl via PHP, sort -R oder shuf)
+    if command -v php >/dev/null 2>&1; then
+        local php_sampler='
+            $lines = array_filter(explode("\n", trim(stream_get_contents(STDIN))));
+            if (empty($lines)) exit(0);
+            $count = (int)($argv[1] ?? 3);
+            shuffle($lines);
+            $selected = array_slice($lines, 0, $count);
+            foreach ($selected as $u) echo $u . "\n";
+        '
+        printf "%s\n" "${all_urls[@]}" | php -r "$php_sampler" "$sample_count" 2>/dev/null
+    elif command -v shuf >/dev/null 2>&1; then
+        printf "%s\n" "${all_urls[@]}" | shuf -n "$sample_count" 2>/dev/null
+    else
+        printf "%s\n" "${all_urls[@]}" | sort -R 2>/dev/null | head -n "$sample_count"
+    fi
+}
+
+# Erstellt einen Screenshot einer Website-URL
+function capture_screenshot() {
+    local target_url="$1"
+    local output_file="$2"
+    local method="${3:-mshots}" # 'mshots', 'local'
+
+    [ -z "$target_url" ] || [ -z "$output_file" ] && return 1
+    mkdir -p "$(dirname "$output_file")" 2>/dev/null || true
+
+    if [ "$method" == "local" ]; then
+        if command -v shot-scraper >/dev/null 2>&1; then
+            shot-scraper "$target_url" -o "$output_file" --width 1280 --height 960 2>/dev/null && return 0
+        elif command -v chromium >/dev/null 2>&1; then
+            chromium --headless --disable-gpu --screenshot="$output_file" --window-size=1280,960 "$target_url" 2>/dev/null && return 0
+        elif command -v google-chrome >/dev/null 2>&1; then
+            google-chrome --headless --disable-gpu --screenshot="$output_file" --window-size=1280,960 "$target_url" 2>/dev/null && return 0
+        fi
+        # Fallback auf mshots
+        method="mshots"
+    fi
+
+    if [ "$method" == "mshots" ]; then
+        local encoded_url=""
+        if command -v php >/dev/null 2>&1; then
+            encoded_url=$(php -r 'echo rawurlencode($argv[1]);' "$target_url" 2>/dev/null)
+        else
+            encoded_url=$(echo "$target_url" | sed -e 's/:/%3A/g' -e 's/\//%2F/g' -e 's/\?/%3F/g' -e 's/&/%26/g' -e 's/=/%3D/g')
+        fi
+
+        local mshots_endpoint="https://s0.wp.com/mshots/v1/${encoded_url}?w=1280&h=960"
+
+        # mshots erzeugt den Screenshot beim ersten Aufruf asynchron. Daher 1-2 Retries falls Platzhalter
+        local attempt=1
+        while [ "$attempt" -le 3 ]; do
+            if command -v curl >/dev/null 2>&1; then
+                curl -s -S -L -k --max-time 25 -o "$output_file" "$mshots_endpoint" 2>/dev/null || true
+            elif command -v wget >/dev/null 2>&1; then
+                wget -q -O "$output_file" --no-check-certificate --timeout=25 "$mshots_endpoint" 2>/dev/null || true
+            fi
+
+            local f_size
+            f_size=$(get_file_size_bytes "$output_file")
+            # Ein valider Screenshot von mshots ist in der Regel > 4000 Bytes
+            if [ -f "$output_file" ] && [ "$f_size" -ge 4000 ]; then
+                return 0
+            fi
+
+            attempt=$((attempt + 1))
+            [ "$attempt" -le 3 ] && sleep 2
+        done
+
+        # Prüfen ob zumindest eine Datei erzeugt wurde (> 1000 Bytes)
+        if [ -f "$output_file" ] && [ "$(get_file_size_bytes "$output_file")" -gt 1000 ]; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+# Vergleicht zwei Screenshots und berechnet die Abweichung in Prozent (0.00 bis 100.00)
+# Erzeugt optional ein Differenzbild (diff_file)
+function compare_screenshots() {
+    local file_before="$1"
+    local file_after="$2"
+    local diff_file="${3:-}"
+
+    if [ ! -f "$file_before" ] || [ ! -f "$file_after" ]; then
+        echo "100.00"
+        return 1
+    fi
+
+    # 1. Bevorzugt: ImageMagick (compare oder magick compare)
+    local im_bin=""
+    if command -v compare >/dev/null 2>&1; then
+        im_bin="compare"
+    elif command -v magick >/dev/null 2>&1; then
+        im_bin="magick compare"
+    fi
+
+    if [ -n "$im_bin" ]; then
+        local target_diff="${diff_file:-/dev/null}"
+        [ "$target_diff" == "/dev/null" ] && target_diff="null:"
+
+        local raw_rmse
+        raw_rmse=$($im_bin -metric RMSE -fuzz 5% "$file_before" "$file_after" "$target_diff" 2>&1 || true)
+        # Typische Ausgabe: "1234.5 (0.0188382)" -> 0.0188382 entspricht 1.88%
+        local norm_val
+        norm_val=$(echo "$raw_rmse" | grep -oE '\([0-9.]+\)' | tr -d '()')
+        if [ -n "$norm_val" ]; then
+            local pct
+            pct=$(awk "BEGIN {printf \"%.2f\", ($norm_val * 100)}" 2>/dev/null || echo 0.00)
+            echo "$pct"
+            return 0
+        fi
+    fi
+
+    # 2. Zweite Wahl: PHP mit GD-Erweiterung
+    if command -v php >/dev/null 2>&1 && php -r 'exit(extension_loaded("gd") ? 0 : 1);' >/dev/null 2>&1; then
+        local php_diff_script='
+            $f1 = $argv[1]; $f2 = $argv[2]; $fd = $argv[3] ?? "";
+            $im1 = @imagecreatefromstring(@file_get_contents($f1));
+            $im2 = @imagecreatefromstring(@file_get_contents($f2));
+            if (!$im1 || !$im2) { echo "100.00\n"; exit(1); }
+            $w1 = imagesx($im1); $h1 = imagesy($im1);
+            $w2 = imagesx($im2); $h2 = imagesy($im2);
+            $w = min($w1, $w2); $h = min($h1, $h2);
+            $diff_img = imagecreatetruecolor($w, $h);
+            $red = imagecolorallocate($diff_img, 255, 0, 0);
+            $diff_count = 0;
+            $step = 2; // Schneller 2-Pixel-Raster
+            $total_samples = 0;
+            for ($y = 0; $y < $h; $y += $step) {
+                for ($x = 0; $x < $w; $x += $step) {
+                    $total_samples++;
+                    $c1 = imagecolorat($im1, $x, $y);
+                    $c2 = imagecolorat($im2, $x, $y);
+                    $r1 = ($c1 >> 16) & 0xFF; $g1 = ($c1 >> 8) & 0xFF; $b1 = $c1 & 0xFF;
+                    $r2 = ($c2 >> 16) & 0xFF; $g2 = ($c2 >> 8) & 0xFF; $b2 = $c2 & 0xFF;
+                    $dist = sqrt(($r1 - $r2)**2 + ($g1 - $g2)**2 + ($b1 - $b2)**2);
+                    if ($dist > 25) { // ~5.5% RGB-Distanz
+                        $diff_count++;
+                        imagesetpixel($diff_img, $x, $y, $red);
+                    } else {
+                        $gv = (int)(($r1 + $g1 + $b1) / 3 * 0.35);
+                        $gray = imagecolorallocate($diff_img, $gv, $gv, $gv);
+                        imagesetpixel($diff_img, $x, $y, $gray);
+                    }
+                }
+            }
+            if ($fd && $fd !== "/dev/null") {
+                @imagepng($diff_img, $fd);
+            }
+            $pct = round(($diff_count / max(1, $total_samples)) * 100, 2);
+            echo number_format($pct, 2, ".", "") . "\n";
+            imagedestroy($im1); imagedestroy($im2); imagedestroy($diff_img);
+        '
+        local php_pct
+        php_pct=$(php -r "$php_diff_script" "$file_before" "$file_after" "${diff_file:-/dev/null}" 2>/dev/null)
+        if [ -n "$php_pct" ]; then
+            echo "$php_pct"
+            return 0
+        fi
+    fi
+
+    # 3. Fallback: Dateigrößen-Heuristik
+    local sz1 sz2
+    sz1=$(get_file_size_bytes "$file_before")
+    sz2=$(get_file_size_bytes "$file_after")
+    if [ "$sz1" -le 1000 ] || [ "$sz2" -le 1000 ]; then
+        echo "100.00"
+        return 0
+    fi
+    local diff_sz=$(( sz1 > sz2 ? sz1 - sz2 : sz2 - sz1 ))
+    local sz_pct
+    sz_pct=$(awk "BEGIN {printf \"%.2f\", (($diff_sz / $sz1) * 100)}" 2>/dev/null || echo 0.00)
+    echo "$sz_pct"
+    return 0
+}
+
+################################
+################################
+################################
 ## Update-Ablauf für ein einzelnes Projekt
 
 function run_update_for_project() {
@@ -943,6 +1274,9 @@ function run_update_for_project() {
     SKIP_PLUGINS=""
     BACKUP_MAX_AGE_MIN="60"
     RUN_BACKUP_FIRST="yes"
+    ENABLE_SCREENSHOTS="yes"
+    SCREENSHOT_PAGES_COUNT="3"
+    SCREENSHOT_METHOD="mshots"
 
     # Konfiguration laden
     # shellcheck source=/dev/null
@@ -955,6 +1289,7 @@ function run_update_for_project() {
     local failed_list=()
     local skipped_list=()
     local http_results=()
+    local screenshot_results=()
     local new_log_lines_count=0
     local fatal_errors_count=0
 
@@ -1185,6 +1520,72 @@ function run_update_for_project() {
     local debug_log_file="$resolved_wp_path/wp-content/debug.log"
     local debug_log_lines_before=0
     [ -f "$debug_log_file" ] && debug_log_lines_before=$(wc -l < "$debug_log_file" 2>/dev/null || echo 0)
+
+    # Screenshots vor Update erfassen (Visuelle Regression)
+    local do_screenshots="false"
+    local screenshot_urls=()
+    local screenshot_labels=()
+    local screenshots_dir="$run_dir/screenshots"
+
+    if [ "$ENABLE_SCREENSHOTS" == "yes" ] && [ "$cli_no_screenshots" != "true" ] && [ "$cli_dry_run" != "true" ]; then
+        do_screenshots="true"
+        mkdir -p "$screenshots_dir"
+        chmod 700 "$screenshots_dir" 2>/dev/null || true
+        ensure_webroot_protection "$screenshots_dir" "deny_all"
+
+        echo
+        echo "Erfasse Vorher-Screenshots für visuelle Regressionsprüfung ..." | tee -a "$run_log"
+
+        # 1. Startseite
+        local norm_site_url="${SITE_URL%/}"
+        screenshot_urls+=("$norm_site_url/")
+        screenshot_labels+=("Startseite")
+
+        # 2. CHECK_PATHS
+        for cp in "${paths_array[@]}"; do
+            [ "$cp" == "/" ] || [ -z "$cp" ] && continue
+            screenshot_urls+=("${norm_site_url}/${cp#/}")
+            screenshot_labels+=("Pfad $cp")
+        done
+
+        # 3. Zufällige Sitemap-Seiten
+        local sitemap_count="${SCREENSHOT_PAGES_COUNT:-3}"
+        if [ "$sitemap_count" -gt 0 ] 2>/dev/null; then
+            local sm_urls=()
+            while IFS= read -r sm_line; do
+                [ -n "$sm_line" ] && sm_urls+=("$sm_line")
+            done < <(discover_sitemap_urls "$norm_site_url" "$sitemap_count")
+
+            local sm_idx=1
+            for sm_u in "${sm_urls[@]}"; do
+                local duplicate=0
+                for existing_u in "${screenshot_urls[@]}"; do
+                    if [ "$existing_u" == "$sm_u" ] || [ "${existing_u%/}" == "${sm_u%/}" ]; then
+                        duplicate=1
+                        break
+                    fi
+                done
+                if [ "$duplicate" -eq 0 ]; then
+                    screenshot_urls+=("$sm_u")
+                    screenshot_labels+=("Sitemap-$sm_idx")
+                    sm_idx=$((sm_idx + 1))
+                fi
+            done
+        fi
+
+        local s_idx=0
+        for s_url in "${screenshot_urls[@]}"; do
+            local file_vorher="$screenshots_dir/page_${s_idx}_vorher.png"
+            local s_label="${screenshot_labels[$s_idx]}"
+            echo "  Erstelle Vorher-Screenshot für $s_label ($s_url) ..." | tee -a "$run_log"
+            if capture_screenshot "$s_url" "$file_vorher" "${SCREENSHOT_METHOD:-mshots}"; then
+                log_check_item "OK" "Vorher-Screenshot für $s_label erstellt ($(get_file_size_bytes "$file_vorher") Bytes)" "$run_log"
+            else
+                log_check_item "WARN" "Vorher-Screenshot für $s_label konnte nicht erstellt werden" "$run_log"
+            fi
+            s_idx=$((s_idx + 1))
+        done
+    fi
 
     # 7. Updates durchführen
     echo
@@ -1431,6 +1832,60 @@ function run_update_for_project() {
         fi
     done
 
+    # Visueller Screenshot-Vergleich nach Update
+    if [ "$do_screenshots" == "true" ]; then
+        echo
+        echo "==================================================" | tee -a "$run_log"
+        echo "Führe visuellen Screenshot-Vergleich nach Update durch ..." | tee -a "$run_log"
+        echo "==================================================" | tee -a "$run_log"
+
+        local s_idx=0
+        for s_url in "${screenshot_urls[@]}"; do
+            local file_vorher="$screenshots_dir/page_${s_idx}_vorher.png"
+            local file_nachher="$screenshots_dir/page_${s_idx}_nachher.png"
+            local file_diff="$screenshots_dir/page_${s_idx}_diff.png"
+            local s_label="${screenshot_labels[$s_idx]}"
+
+            if [ -f "$file_vorher" ]; then
+                echo "  Erstelle Nachher-Screenshot für $s_label ($s_url) ..." | tee -a "$run_log"
+                if capture_screenshot "$s_url" "$file_nachher" "${SCREENSHOT_METHOD:-mshots}"; then
+                    local diff_pct
+                    diff_pct=$(compare_screenshots "$file_vorher" "$file_nachher" "$file_diff")
+                    local diff_float="${diff_pct:-0.00}"
+
+                    local diff_int
+                    diff_int=$(echo "$diff_float" | cut -d. -f1)
+                    diff_int=${diff_int:-0}
+
+                    local diff_rel_path="screenshots/page_${s_idx}_diff.png"
+                    local vorher_rel_path="screenshots/page_${s_idx}_vorher.png"
+                    local nachher_rel_path="screenshots/page_${s_idx}_nachher.png"
+
+                    if [ "$diff_int" -ge 20 ]; then
+                        log_check_item "ROT" "Visuelle Abweichung auf $s_label beträgt ${diff_float}% (Starke Layoutänderung / möglicher Fehler)!" "$run_log" "Differenzbild prüfen: $file_diff"
+                        status_reasons+=("Visuelle Abweichung auf $s_label beträgt ${diff_float}%")
+                        final_status="rot"
+                        final_exitcode=2
+                        screenshot_results+=("{\"url\": \"$(json_escape "$s_url")\", \"label\": \"$(json_escape "$s_label")\", \"vorher\": \"$vorher_rel_path\", \"nachher\": \"$nachher_rel_path\", \"diff\": \"$diff_rel_path\", \"abweichung_prozent\": $diff_float, \"status\": \"rot\"}")
+                    elif [ "$diff_int" -ge 5 ]; then
+                        log_check_item "WARN" "Visuelle Abweichung auf $s_label beträgt ${diff_float}% (Mäßige Abweichung)" "$run_log" "Differenzbild prüfen: $file_diff"
+                        status_reasons+=("Visuelle Abweichung auf $s_label (${diff_float}%)")
+                        [ "$final_exitcode" -lt 1 ] && final_exitcode=1
+                        [ "$final_status" == "gruen" ] && final_status="gelb"
+                        screenshot_results+=("{\"url\": \"$(json_escape "$s_url")\", \"label\": \"$(json_escape "$s_label")\", \"vorher\": \"$vorher_rel_path\", \"nachher\": \"$nachher_rel_path\", \"diff\": \"$diff_rel_path\", \"abweichung_prozent\": $diff_float, \"status\": \"gelb\"}")
+                    else
+                        log_check_item "OK" "Visuelle Prüfung für $s_label erfolgreich (Abweichung: ${diff_float}%)" "$run_log"
+                        screenshot_results+=("{\"url\": \"$(json_escape "$s_url")\", \"label\": \"$(json_escape "$s_label")\", \"vorher\": \"$vorher_rel_path\", \"nachher\": \"$nachher_rel_path\", \"diff\": \"$diff_rel_path\", \"abweichung_prozent\": $diff_float, \"status\": \"gruen\"}")
+                    fi
+                else
+                    log_check_item "WARN" "Nachher-Screenshot für $s_label konnte nicht geladen werden" "$run_log"
+                    screenshot_results+=("{\"url\": \"$(json_escape "$s_url")\", \"label\": \"$(json_escape "$s_label")\", \"vorher\": \"screenshots/page_${s_idx}_vorher.png\", \"nachher\": null, \"diff\": null, \"abweichung_prozent\": null, \"status\": \"fehler\"}")
+                fi
+            fi
+            s_idx=$((s_idx + 1))
+        done
+    fi
+
     # 9. rollback.sh erzeugen
     local rollback_file="$run_dir/rollback.sh"
     cat <<EOF > "$rollback_file"
@@ -1534,6 +1989,14 @@ function write_and_output_result() {
     done
     http_json+="]"
 
+    local screenshots_json="["
+    local sc_first=1
+    for sc_res in "${screenshot_results[@]}"; do
+        [ "$sc_first" -eq 1 ] && sc_first=0 || screenshots_json+=", "
+        screenshots_json+="$sc_res"
+    done
+    screenshots_json+="]"
+
     local project_json
     project_json=$(cat <<EOF
 {
@@ -1549,6 +2012,7 @@ function write_and_output_result() {
   "fehlgeschlagen": $fehlgeschlagen_json,
   "uebersprungen": $uebersprungen_json,
   "http": $http_json,
+  "screenshots": $screenshots_json,
   "neue_logzeilen": $new_log_lines_count,
   "fatal_errors": $fatal_errors_count,
   "run_dir": "$(json_escape "$run_dir")"

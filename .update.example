@@ -27,3 +27,16 @@ BACKUP_MAX_AGE_MIN="60"
 # Vor dem Update automatisch ein vollständiges Backup via backup_full_db_files_zip.sh ausführen (yes / no)
 # Bei "yes" wird das Update NUR fortgesetzt, wenn das Backup mit Exitcode 0 oder 1 (mit verifizierten Dateien) beendet wurde.
 RUN_BACKUP_FIRST="yes"
+
+# Visuellen Screenshot-Vergleich vor und nach dem Update durchführen (yes / no)
+# Erstellt Vorher- und Nachher-Screenshots, berechnet Differenzbilder und warnt bei visuellen Layoutbrüchen.
+ENABLE_SCREENSHOTS="yes"
+
+# Anzahl zufälliger Unterseiten aus der Sitemap (z. B. /wp-sitemap.xml) für den visuellen Screenshot-Vergleich
+# Standard: 3 (zusätzlich zur Startseite und den konfigurierten CHECK_PATHS; 0 = nur Startseite und CHECK_PATHS)
+SCREENSHOT_PAGES_COUNT="3"
+
+# Methode zur Screenshot-Erstellung
+# "mshots" = Automatischer Dienst von WordPress/Automattic (benötigt keine Server-Browser-Installation)
+# "local"  = Lokaler Headless-Browser auf dem Server (z. B. shot-scraper, chromium, google-chrome)
+SCREENSHOT_METHOD="mshots"

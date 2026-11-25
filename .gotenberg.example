@@ -1,0 +1,14 @@
+# .gotenberg.example - Beispiel-Konfiguration für zentralen Gotenberg 9 Screenshot-Dienst
+# Kopieren nach .gotenberg im Skriptverzeichnis und Zugangsdaten eintragen (chmod 600):
+#   cp .gotenberg.example .gotenberg
+#   chmod 600 .gotenberg
+
+# Basis-URL des Gotenberg 9 Dienstes
+GOTENBERG_URL='https://gotenberg.gregor-wendland.com'
+
+# HTTP Basic Auth Zugangsdaten (leer lassen, falls keine Authentifizierung aktiv ist)
+GOTENBERG_USER=''
+GOTENBERG_PASS=''
+
+# Timeout in Sekunden für Screenshot-Anfragen
+GOTENBERG_TIMEOUT='60'

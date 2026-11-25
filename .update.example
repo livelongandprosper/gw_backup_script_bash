@@ -29,14 +29,29 @@ BACKUP_MAX_AGE_MIN="60"
 RUN_BACKUP_FIRST="yes"
 
 # Visuellen Screenshot-Vergleich vor und nach dem Update durchführen (yes / no)
-# Erstellt Vorher- und Nachher-Screenshots, berechnet Differenzbilder und warnt bei visuellen Layoutbrüchen.
+# Erstellt Vorher- und Nachher-Screenshots über den zentralen Gotenberg 9 Dienst (.gotenberg),
+# berechnet Differenzbilder und warnt bei visuellen Layoutbrüchen (<1% GRÜN, 1-5% GELB, >5% ROT).
 ENABLE_SCREENSHOTS="yes"
 
-# Anzahl zufälliger Unterseiten aus der Sitemap (z. B. /wp-sitemap.xml) für den visuellen Screenshot-Vergleich
-# Standard: 3 (zusätzlich zur Startseite und den konfigurierten CHECK_PATHS; 0 = nur Startseite und CHECK_PATHS)
-SCREENSHOT_PAGES_COUNT="3"
+# Zu prüfende Pfade für Screenshots (Standard: "/" + CHECK_PATHS)
+# Durch Leerzeichen getrennt (z.B. "/ /kontakt/ /impressum/")
+SCREENSHOT_PATHS="/ /kontakt/ /impressum/"
 
-# Methode zur Screenshot-Erstellung
-# "mshots" = Automatischer Dienst von WordPress/Automattic (benötigt keine Server-Browser-Installation)
-# "local"  = Lokaler Headless-Browser auf dem Server (z. B. shot-scraper, chromium, google-chrome)
-SCREENSHOT_METHOD="mshots"
+# Viewport-Breiten für Screenshots in CSS-Pixeln (Standard: "1440 390")
+# Erzeugt für jeden Pfad jeweils einen Desktop- und einen Mobile-Screenshot.
+SCREENSHOT_WIDTHS="1440 390"
+
+# Wartezeit vor Screenshot-Aufnahme in Gotenberg (Standard: "2s")
+SCREENSHOT_WAIT="2s"
+
+# Optionale Cookies im JSON-Format (z. B. für Cookie-Consent-Banner)
+# SCREENSHOT_COOKIES='[{"name":"cookie_notice_accepted","value":"true","domain":"kundeA.de"}]'
+SCREENSHOT_COOKIES=""
+
+# Optionale Ignore-Bereiche vor dem Bildvergleich (Format: "x,y,w,h;..." z. B. für dynamische Slider/Ticker)
+# Diese Rechtecke werden vor dem Bildvergleich in beiden Screenshots einfarbig maskiert.
+SCREENSHOT_IGNORE_RECTS=""
+
+# Schwellenwerte für visuelle Abweichung in Prozent (Standard: Warnung ab 1.0 %, Fehler ab 5.0 %)
+SCREENSHOT_DIFF_THRESHOLD_WARN="1.0"
+SCREENSHOT_DIFF_THRESHOLD_FAIL="5.0"

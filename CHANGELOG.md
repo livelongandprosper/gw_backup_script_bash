@@ -7,6 +7,33 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
 
 ---
 
+## [2.2.0] - 2026-11-25
+
+### Hinzugefügt
+- **Healthchecks.io Alarmierung im Backup-Skript (`backup_full_db_files_zip.sh` v2.2.0):**
+  - Parameter `HEALTHCHECK_URL` in `.env.<projekt>` zur zentralen Überwachung von Backup-Läufen.
+  - Automatischer Start-Ping (`<url>/start`) bei Laufbeginn und Status-Ping (`<url>/<exitcode>`, z. B. `/0`, `/1`, `/2`) am Ende.
+  - Timeout auf 10s begrenzt; Verbindungs- oder Netzwerkfehler beeinträchtigen das Backup nicht.
+  - Setup-Assistent fragt die URL optional ab und sendet direkt einen Test-Ping.
+- **Gotenberg 9 Screenshot-Dienst in `update_wp.sh` (v1.1.0):**
+  - Umstellung auf den zentralen Gotenberg 9 Dienst (`https://gotenberg.gregor-wendland.com`) mit Basic-Auth über sichere stdin-Konfiguration (`curl -K -` / kein Passwort in CLI-Prozessliste).
+  - Zentrale Konfigurationsdatei `.gotenberg` (chmod 600, Webroot-Schutz `.htaccess`).
+  - Unterstützung für Multi-Viewports (`SCREENSHOT_WIDTHS="1440 390"`), Wartezeiten (`SCREENSHOT_WAIT="2s"`), Cookie-Consent (`SCREENSHOT_COOKIES`) und benutzerdefinierte Ignore-Bereiche (`SCREENSHOT_IGNORE_RECTS`).
+  - Geschärfte Schwellenwerte: $< 1.0\,\%$ GRÜN, $1.0 - 5.0\,\%$ GELB, $> 5.0\,\%$ ROT.
+  - Fehlertoleranz: Ist Gotenberg offline oder liefert ein ungültiges Bild, bricht das Update nicht ab, sondern stuft die Optik-Prüfung kontrolliert auf GELB ("Screenshot-Dienst nicht erreichbar") ein.
+  - Neuer CLI-Parameter `--test-screenshot[=<URL>]` zum schnellen Testen der Gotenberg-Verbindung.
+  - Menüpunkt 5 zum Verbindungstest im interaktiven Hauptmenü.
+- **Erweiterter Webroot-Schutz:**
+  - `.htaccess` sperrt jetzt standardmäßig `.env*`, `.update*`, `.gotenberg*`, `.git*`, `*.log`, `*.sh`, `*.json` und `*.lock`.
+
+### Entfernt
+- **Alte Screenshot-Methoden (mshots & lokale Headless-Browser):**
+  - Vollständige Entfernung von Automattic `mshots` (da mshots veraltete Cache-Bilder liefern konnte, was zu falschem GRÜN führte, und Kunden-URLs an externe Drittanbieter übermittelte).
+  - Vollständige Entfernung lokaler Headless-Browser-Aufrufe (da Chromium/shot-scraper auf Shared-Hosting-Servern nicht verlässlich verfügbar sind).
+  - Veraltete Konfigurationsoptionen (`SCREENSHOT_METHOD`, `SCREENSHOT_PAGES_COUNT`) werden beim Einlesen bestehender `.update.<projekt>`-Dateien ignoriert und mit einem einmaligen Hinweis im Log dokumentiert.
+
+---
+
 ## [2.1.0] - 2026-11-25
 
 ### Hinzugefügt

@@ -28,7 +28,7 @@ before=$(date +%s)
 
 ###
 # BackupScript zum Backup von Websites
-# Version: 2.1.0
+# Version: 2.2.0
 #
 # - Dateien einer Website
 # - - optional können Dateien ausgeschlossen werden (SOURCE_FILES_DIR_IGNORE)
@@ -36,6 +36,7 @@ before=$(date +%s)
 # - Automatische WordPress-Erkennung & wp-config-Import
 # - Automatische Integritäts- und Strukturselbstprüfung (verify_backup)
 # - Maschinenlesbare Statusdateien (<scriptordner>/status/<PROJEKT>.last.json)
+# - Healthchecks.io Alarmierung (HEALTHCHECK_URL) bei Laufbeginn (/start) und Ende (/<exitcode>)
 # - Backup-Dateien können an entfernten Server via sftp oder rsync übertragen werden
 #
 # Dieses eine Skript kann für beliebig viele Projekte im selben Ordner verwendet werden.
@@ -253,7 +254,7 @@ function ensure_webroot_protection() {
         if [ "$mode" == "sensitive_only" ]; then
             cat > "$htaccess_path" <<'EOF'
 # Schutz sensibler Dateien vor direktem Web-Aufruf (Apache 2.4 & 2.2)
-<FilesMatch "^(\.env.*|\.git.*|.*\.log|.*\.sh)$">
+<FilesMatch "^(\.env.*|\.update.*|\.gotenberg.*|\.git.*|.*\.log|.*\.sh|.*\.json|.*\.lock)$">
     <IfModule mod_authz_core.c>
         Require all denied
     </IfModule>
@@ -276,6 +277,24 @@ EOF
 EOF
         fi
         chmod 644 "$htaccess_path" 2>/dev/null || true
+    fi
+}
+
+# Sendet Pings an Healthchecks.io (Laufbeginn: /start, Laufende: /<exitcode>, Test: ohne Suffix)
+# Timeout 10s. Netzwerkfehler beeinträchtigen das Backup nicht.
+function send_healthcheck_ping() {
+    local hc_url="$1"
+    local endpoint_suffix="${2:-}"
+    local log_target="${3:-/dev/null}"
+
+    [ -z "$hc_url" ] && return 0
+    local ping_url="${hc_url%/}"
+    [ -n "$endpoint_suffix" ] && ping_url="${ping_url}/${endpoint_suffix#/}"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsS -m 10 --retry 1 "$ping_url" >/dev/null 2>&1 || true
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O /dev/null --timeout=10 --tries=1 --no-check-certificate "$ping_url" >/dev/null 2>&1 || true
     fi
 }
 
@@ -614,7 +633,8 @@ function write_project_env_file() {
     local r_user="${16}"
     local r_dir="${17}"
     local r_key="${18}"
-    shift 18
+    local healthcheck_url="${19:-}"
+    shift 19
     local dbs=("$@")
 
     local count=${#dbs[@]}
@@ -673,6 +693,10 @@ RSYNC_KEY='$r_key'
 
 BACKUP_LIVE_TIME='$b_live_time'
 DELETE_IF_TRANSMITTED='$del_transmitted'
+
+# Healthchecks.io Alarmierung (Ping bei Start mit /start, bei Ende mit /<exitcode>)
+# Leer lassen, um Healthchecks-Ping zu deaktivieren
+HEALTHCHECK_URL='$healthcheck_url'
 
 # E-Mail-Benachrichtigung (aktuell noch nicht implementiert)
 STATUS_EMAIL_ADDRESS=''
@@ -836,7 +860,7 @@ function scan_and_setup_wordpress_sites() {
         backup_live_time=${backup_live_time:-0}
 
         local target_env_file="$basename/.env.$project_name"
-        write_project_env_file "$target_env_file" "$project_name" "$basis_name" "$default_scope" "$source_files_dir" "$source_files_dir_ignore_literal" "$backup_live_time" "false" "" "" "" "" "" "/usr/bin/ssh" "" "" "" "" "$db_host" "$db_name" "$db_user" "$db_pass"
+        write_project_env_file "$target_env_file" "$project_name" "$basis_name" "$default_scope" "$source_files_dir" "$source_files_dir_ignore_literal" "$backup_live_time" "false" "" "" "" "" "" "/usr/bin/ssh" "" "" "" "" "" "$db_host" "$db_name" "$db_user" "$db_pass"
 
         echo "-> Projekt '$project_name' erfolgreich als $target_env_file gespeichert."
         created_count=$((created_count + 1))
@@ -1073,6 +1097,15 @@ function run_setup_assistant() {
     fi
 
     echo
+    echo "--- Healthchecks.io Alarmierung (optional, leer lassen zum Überspringen) ---"
+    read -rp "Healthchecks Ping-URL (z.B. https://hc-ping.com/uuid): " input_healthcheck_url
+    local healthcheck_url="${input_healthcheck_url:-}"
+    if [ -n "$healthcheck_url" ]; then
+        echo "Sende Test-Ping an Healthchecks ..."
+        send_healthcheck_ping "$healthcheck_url" ""
+    fi
+
+    echo
     read -rp "Backup-Lebenszeit in Tagen (0 = unendlich) [0]: " backup_live_time
     backup_live_time=${backup_live_time:-0}
     read -rp "Lokale Backup-Dateien nach erfolgreicher Übertragung löschen? (true/false) [false]: " delete_if_transmitted
@@ -1091,7 +1124,7 @@ function run_setup_assistant() {
         db_args+=("${db_hosts[$i]}" "${db_names[$i]}" "${db_users[$i]}" "${db_passwords[$i]}")
     done
 
-    write_project_env_file "$target_env_file" "$project_name" "$projekt_basis_dateiname" "$default_scope" "$source_files_dir" "$source_files_dir_ignore_literal" "$backup_live_time" "$delete_if_transmitted" "$sftp_host" "$sftp_port" "$sftp_user" "$sftp_key" "$sftp_directory" "$sftp_path_to_ssh_binary" "$rsync_host" "$rsync_user" "$rsync_directory" "$rsync_key" "${db_args[@]}"
+    write_project_env_file "$target_env_file" "$project_name" "$projekt_basis_dateiname" "$default_scope" "$source_files_dir" "$source_files_dir_ignore_literal" "$backup_live_time" "$delete_if_transmitted" "$sftp_host" "$sftp_port" "$sftp_user" "$sftp_key" "$sftp_directory" "$sftp_path_to_ssh_binary" "$rsync_host" "$rsync_user" "$rsync_directory" "$rsync_key" "$healthcheck_url" "${db_args[@]}"
 
     echo
     echo "======================================"
@@ -2326,6 +2359,7 @@ function run_backup_for_project() {
 
     status_email_address="$STATUS_EMAIL_ADDRESS"
     alert_email_address="$ALERT_EMAIL_ADDRESS"
+    healthcheck_url="${HEALTHCHECK_URL:-}"
 
     # Backup Zielordner & Logs sicher anlegen (Webroot-Schutz für Apache 2.4/2.2)
     backup_destiantion="$basename/$projekt_basis_dateiname/"
@@ -2338,6 +2372,11 @@ function run_backup_for_project() {
     log_file_name="$basename/log/$projekt_basis_dateiname"'_'"$(date +%Y-%m-%d_%H-%M-%S)"'.log'
     touch "$log_file_name"
     chmod 600 "$log_file_name" 2>/dev/null || true
+
+    # Healthchecks.io Start-Ping senden
+    if [ -n "$healthcheck_url" ]; then
+        send_healthcheck_ping "$healthcheck_url" "start" "$log_file_name"
+    fi
 
     # Dateiendungen
     dateiendung_zip='.zip'
@@ -2703,6 +2742,11 @@ EOF
 
     if [ "$project_exitcode" -gt "$overall_exitcode" ]; then
         overall_exitcode="$project_exitcode"
+    fi
+
+    # Healthchecks.io Status-Ping (/<exitcode>) senden
+    if [ -n "$healthcheck_url" ]; then
+        send_healthcheck_ping "$healthcheck_url" "$project_exitcode" "$log_file_name"
     fi
 
     echo | tee -a "$log_file_name"

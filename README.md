@@ -23,18 +23,21 @@ Die Einrichtung auf einem neuen Shared-Hosting-Account oder Server erfolgt in dr
    ```
    *Durchsucht den übergeordneten Ordner nach WordPress-Installationen, liest Datenbank-Zugangsdaten aus `wp-config.php` aus, schlägt Projektnamen vor und legt `.env.<projekt>` (chmod 600) an.*
 
-3. **Update-Verwaltung & WP-CLI initialisieren**
+3. **Update-Verwaltung, Gotenberg & WP-CLI initialisieren**
    ```bash
    ./update_wp.sh --setup
    ```
-   *Prüft PHP-CLI und Tools, lädt bei Bedarf WP-CLI automatisch nach `./bin/` herunter (inkl. SHA-512 Prüfung) und erzeugt `.update.<projekt>` mit Prüfpfaden, Blognamen und Rollback-Vorgaben.*
+   *Prüft PHP-CLI und Tools, richtet die zentrale Gotenberg-9-Verbindung (`.gotenberg`) ein, lädt bei Bedarf WP-CLI automatisch nach `./bin/` herunter (inkl. SHA-512 Prüfung) und erzeugt `.update.<projekt>` mit Prüfpfaden, Blognamen und Rollback-Vorgaben.*
 
 Fertig! Danach können Backups und Updates jederzeit interaktiv per Menü oder automatisiert per CLI/SSH aufgerufen werden:
 ```bash
 # Backup ausführen:
 ./backup_full_db_files_zip.sh --project=kundeA
 
-# WordPress-Updates sicher ausführen (mit Backup, Vor-/Nachprüfung und Rollback-Skript):
+# Gotenberg-Verbindung testen:
+./update_wp.sh --test-screenshot
+
+# WordPress-Updates sicher ausführen (mit Backup, Vor-/Nachprüfung, Gotenberg-Screenshots und Rollback-Skript):
 ./update_wp.sh --project=kundeA
 ```
 
@@ -42,7 +45,7 @@ Fertig! Danach können Backups und Updates jederzeit interaktiv per Menü oder a
 
 ## backup_full_db_files_zip.sh ##
 - Dateien werden gezipt, Datenbankdump mit mysqldump erstellt und gezipt
-    - beim packen der Dateien ist es möglich Ordner auszuschließen
+    - beim Packen der Dateien ist es möglich Ordner auszuschließen
 - es können beliebig viele Datenbanken gesichert werden (nicht auf eine feste Anzahl begrenzt)
 - **ein Skript für beliebig viele Projekte**: jedes Projekt (z.B. jede Website) bekommt seine
   eigene Konfigurationsdatei, es muss keine eigene Skript-Kopie pro Projekt angelegt werden
@@ -56,6 +59,10 @@ Fertig! Danach können Backups und Updates jederzeit interaktiv per Menü oder a
   - Datenbankdumps werden auf mysqldump-Kopfzeile, `-- Dump completed`-Abschluss und WordPress-Tabellen (`<prefix>options`, `<prefix>posts`) geprüft
   - Dateigröße wird mit dem vorherigen Backup verglichen (> 30 % Abweichung erzeugt eine Warnung)
   - die Prüfung läuft VOR einem optionalen Löschen nach Übertragung (`DELETE_IF_TRANSMITTED`)
+- **Healthchecks.io Alarmierung**:
+  - optionaler Ping bei Start (`<url>/start`) und bei Beendigung (`<url>/<exitcode>`) an `HEALTHCHECK_URL`
+  - pro Kunde/Projekt ein eigener Check in Healthchecks.io (Ausführungszeitraum passend zum Cronjob, z.B. täglich mit 1 Tag Gnadenfrist)
+  - Fehler beim Ping beeinträchtigen das Backup nicht
 - **Ehrliche Exit-Codes**:
   - `0` = Alles in Ordnung
   - `1` = Warnungen (z.B. Übertragung fehlgeschlagen, aber lokale Backups intakt; Größenabweichung > 30 %)
@@ -76,39 +83,43 @@ Fertig! Danach können Backups und Updates jederzeit interaktiv per Menü oder a
 
 ## update_wp.sh ##
 
-Neues Skript zur sicheren Durchführung von WordPress Core-, Plugin-, Theme- und Sprachdateien-Updates:
+Skript zur sicheren Durchführung von WordPress Core-, Plugin-, Theme- und Sprachdateien-Updates:
 
 - **Selbstinstallation & WP-CLI**:
   - prüft PHP-CLI und Systemtools
   - nutzt `wp` aus dem `PATH` oder lädt automatisch `./bin/wp-cli.phar` herunter (inkl. SHA-512 Hash-Prüfung)
   - `--update-wpcli` aktualisiert WP-CLI bei Bedarf
+- **Zentraler Gotenberg 9 Screenshot-Dienst (`.gotenberg`)**:
+  - Visuelle Vorher-/Nachher-Prüfung über eigenen Gotenberg 9 Chromium-Dienst (`https://gotenberg.gregor-wendland.com`)
+  - Basic-Auth ohne Passwortübertragung in CLI/Prozessliste (`curl -K -`)
+  - Multi-Viewport (Desktop `1440px`, Mobile `390px`), `waitDelay`, Cookies und Ignore-Bereiche (`SCREENSHOT_IGNORE_RECTS`)
+  - Ampel-Schwellenwerte: $< 1.0\,\%$ GRÜN, $1.0 - 5.0\,\%$ GELB, $> 5.0\,\%$ ROT
+  - Fällt Gotenberg aus, bricht das Update nicht ab, sondern meldet kontrolliert GELB
 - **Sicherer Ablauf pro Projekt (`--project=<name>|alle`)**:
   1. Lock-Datei pro Projekt verhindert parallele Ausführung
   2. **Vorprüfung**: `wp core is-installed`, kein Wartungsmodus, HTTP-Status 200 auf allen Prüfseiten und Vorkommen von `MUST_CONTAIN` auf der Startseite. Bei Vorfehlern sofortiger Abbruch (ROT = "schon vorher defekt")
   3. **Backup-Pflicht**: Führt vor dem Update `./backup_full_db_files_zip.sh --project=<name> --scope=alles --json` aus. Fortsetzung nur bei Exitcode 0 oder 1 (mit verifizierten Dateien). Bei `--no-backup` wird ein vorhandenes Backup verlangt, das jünger als `BACKUP_MAX_AGE_MIN` (Standard: 60 Min) und Status "ok" ist
   4. **Stand vorher sichern**: Core-Version, Plugin-/Theme-Listen (`--format=json`), Zeilenzahlen der Logs und HTTP-Antwortzeiten werden in `update-runs/<projekt>/<datum>/` archiviert
-  5. **Updates**: Core, Core-DB, Plugins (unter Ausschluss von `SKIP_PLUGINS`), Themes, Sprachen und Cache-Flush. Ein Einzelfehler stoppt Folgeschritte nicht
-  6. **Nachprüfung (Post-Check)**:
+  5. **Vorher-Screenshots**: Erstellt Desktop- und Mobile-Screenshots aller `SCREENSHOT_PATHS` über Gotenberg 9
+  6. **Updates**: Core, Core-DB, Plugins (unter Ausschluss von `SKIP_PLUGINS`), Themes, Sprachen und Cache-Flush. Ein Einzelfehler stoppt Folgeschritte nicht
+  7. **Nachprüfung (Post-Check)**:
      - `wp core verify-checksums`
      - Plugin- und Theme-Versionsdiff
      - Log-Analyse auf neue Zeilen und Fatal Errors
      - HTTP-Status 200, `MUST_CONTAIN` und Fehlertext-Erkennung auf allen Prüfseiten
      - Antwortzeit-Vergleich (> 2× Verlangsamung erzeugt Warnung)
-     - **Visuelle Regressionsprüfung (Screenshot-Vergleich)**:
-       - Vor und nach dem Update werden Screenshots der Startseite, der konfigurierten `CHECK_PATHS` sowie $N$ zufälliger Unterseiten aus der Sitemap (z. B. `/wp-sitemap.xml` oder `/sitemap_index.xml`) erstellt.
-       - Automatischer Bildvergleich via ImageMagick (`compare`), PHP-GD oder Dateigrößen-Heuristik.
-       - Differenzbilder werden in `update-runs/<projekt>/<datum>/screenshots/` gespeichert (z. B. `page_0_diff.png`).
-       - Abweichung $< 5\,\%$ = GRÜN, $5 - 20\,\%$ = GELB (Warnung), $> 20\,\%$ oder Render-Fehler = ROT (Kritischer Fehler / Layout gebrochen).
-       - Kann bei Bedarf übersprungen werden via `--no-screenshots` oder `ENABLE_SCREENSHOTS="no"` in `.update.<projekt>`.
-  7. **Ampel-Status & Exit-Codes**:
-     - **GRÜN (0)**: Alle Updates und Prüfungen bestanden
-     - **GELB (1)**: Einzelne Updates übersprungen/fehlgeschlagen, neue Notices/Warnungen im Log, visuelle Abweichung 5–20 % oder Antwortzeit > 2× verlangsamt
-     - **ROT (2)**: Backup nicht OK, HTTP ≠ 200, Fatal Error, Checksummen falsch, visuelle Abweichung > 20 % oder `core update-db` fehlgeschlagen
-  8. **Automatisches Rollback-Skript**:
+     - **Nachher-Screenshots & Differenzanalyse**:
+       - Maskiert optionale Ignore-Rechtecke und berechnet die Abweichung (ImageMagick `compare` / PHP-GD)
+       - Differenzbilder werden in `update-runs/<projekt>/<datum>/screenshots/` gespeichert
+  8. **Ampel-Status & Exit-Codes**:
+     - **GRÜN (0)**: Alle Updates und Prüfungen bestanden, visuelle Abweichung $< 1.0\,\%$
+     - **GELB (1)**: Einzelne Updates übersprungen/fehlgeschlagen, neue Notices/Warnungen im Log, visuelle Abweichung 1.0–5.0 %, Gotenberg nicht erreichbar oder Antwortzeit > 2× verlangsamt
+     - **ROT (2)**: Backup nicht OK, HTTP ≠ 200, Fatal Error, Checksummen falsch, visuelle Abweichung $> 5.0\,\%$ oder `core update-db` fehlgeschlagen
+  9. **Automatisches Rollback-Skript**:
      - erzeugt `update-runs/<projekt>/<datum>/rollback.sh` mit exakten Downgrade-Befehlen für alle geänderten Plugins/Themes/Core sowie Hinweisen zum Restore via `backup_full_db_files_zip.sh --restore`
 - **Parameter & Menü**:
-  - Ohne Parameter: Interaktives Hauptmenü (Projekt aktualisieren, alle, Dry-Run, Setup, letzte Läufe, Rollback-Befehle)
-  - CLI: `--project=`, `--dry-run`, `--no-backup`, `--no-screenshots`, `--only=core|plugins|themes|languages`, `--setup`, `--update-wpcli`, `--json`, `--help`
+  - Ohne Parameter: Interaktives Hauptmenü (Projekt aktualisieren, alle, Dry-Run, Setup, Gotenberg-Verbindungstest, letzte Läufe, Rollback-Befehle)
+  - CLI: `--project=`, `--dry-run`, `--no-backup`, `--no-screenshots`, `--only=core|plugins|themes|languages`, `--setup`, `--update-wpcli`, `--test-screenshot`, `--json`, `--help`
   - Automatische Bereinigung von Update-Runs älter als 90 Tage
 
 ### Empfohlene Software für visuelle Prüfungen ###

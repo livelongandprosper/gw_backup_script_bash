@@ -28,18 +28,19 @@ before=$(date +%s)
 
 ###
 # update_wp.sh - Sicheres WordPress-Update-Skript mit automatischer Prüfung & Rollback
-# Version: 1.0.0
+# Version: 1.1.0
 #
 # Zweck:
 #   Führt WordPress Core-, Plugin-, Theme- und Sprachdateien-Updates kontrolliert
 #   und sicher durch. Vor jedem Update wird die Website auf Funktionsfähigkeit
-#   geprüft, ein Backup erstellt/verifiziert und nach dem Update ein umfassender
-#   Post-Check (HTTP-Status, Logfehler, Checksummen) durchgeführt.
+#   geprüft, ein Backup erstellt/verifiziert, visuelle Screenshots über den
+#   zentralen Gotenberg 9 Dienst aufgenommen und nach dem Update ein umfassender
+#   Post-Check (HTTP-Status, Logfehler, Checksummen, Visual Diff) durchgeführt.
 #
 # Exit-Codes:
 #   0 = GRÜN (Alle Updates und Prüfungen erfolgreich)
-#   1 = GELB (Updates mit Warnungen, einzelne übersprungen, Antwortzeit verlangsamt)
-#   2 = ROT  (Kritischer Fehler, Vorprüfung/Backup/Checksummen fehlgeschlagen)
+#   1 = GELB (Updates mit Warnungen, einzelne übersprungen, Antwortzeit verlangsamt, Optik-Warnung)
+#   2 = ROT  (Kritischer Fehler, Vorprüfung/Backup/Checksummen fehlgeschlagen, Layout-Bruch)
 #   Bei --project=alle gilt der schlechteste Status aller Projekte.
 #
 # (c) Gregor Wendland 2017-2026 /// free to use, free to change, no warranty
@@ -57,6 +58,8 @@ cli_no_screenshots='false'
 cli_only=''
 cli_setup='false'
 cli_update_wpcli='false'
+cli_test_screenshot='false'
+cli_test_screenshot_url=''
 cli_json='false'
 cli_help='false'
 
@@ -83,6 +86,13 @@ for cli_arg in "$@"; do
         --update-wpcli)
             cli_update_wpcli='true'
             ;;
+        --test-screenshot=*)
+            cli_test_screenshot='true'
+            cli_test_screenshot_url="${cli_arg#*=}"
+            ;;
+        --test-screenshot)
+            cli_test_screenshot='true'
+            ;;
         --json)
             cli_json='true'
             ;;
@@ -104,15 +114,16 @@ if [ "$cli_help" == "true" ]; then
     echo "  --no-backup             Überspringt das automatische Backup (nutzt letztes Backup aus status/)."
     echo "  --no-screenshots        Überspringt den visuellen Screenshot-Vergleich (Regression-Testing)."
     echo "  --only=<bereich>        Nur bestimmte Updates ausführen: core | plugins | themes | languages"
-    echo "  --setup                 Startet den interaktiven Einrichtungsassistenten für .update-Dateien."
+    echo "  --setup                 Startet den interaktiven Einrichtungsassistenten für .update-Dateien & Gotenberg."
     echo "  --update-wpcli          Aktualisiert die lokale WP-CLI (./bin/wp-cli.phar) auf die neueste Version."
+    echo "  --test-screenshot[=URL] Testet die Verbindung zum zentralen Gotenberg 9 Screenshot-Dienst."
     echo "  --json                  Gibt am Ende den Status als JSON auf stdout aus (übrige Ausgabe auf stderr)."
     echo "  --help, -h              Zeigt diesen Hilfetext an."
     echo
     echo "Exit-Codes:"
-    echo "  0 = GRÜN (Alles erfolgreich, Prüfungen bestanden)"
-    echo "  1 = GELB (Warnungen, einzelne Updates fehlgeschlagen/übersprungen oder Antwortzeit verdoppelt)"
-    echo "  2 = ROT  (Kritischer Fehler, Vorprüfung defekt, Checksummen-Fehler oder Fatal Error)"
+    echo "  0 = GRÜN (Alles erfolgreich, Prüfungen bestanden, visuelle Abweichung < 1 %)"
+    echo "  1 = GELB (Warnungen, einzelne Updates übersprungen, Antwortzeit verdoppelt, visuelle Abweichung 1-5 %)"
+    echo "  2 = ROT  (Kritischer Fehler, Vorprüfung defekt, Checksummen-Fehler, Fatal Error, visuelle Abweichung > 5 %)"
     echo
     echo "Ohne Parameter im Terminal wird das interaktive Hauptmenü angezeigt."
     exit 0
@@ -209,11 +220,11 @@ EOF
             chmod 600 "$htaccess_file" 2>/dev/null || true
         fi
     elif [ "$mode" == "sensitive_only" ]; then
-        # Nur sensible Dateien (.env, .update, .sh, .log, .json, .lock) im Skript-Wurzelordner sperren
+        # Nur sensible Dateien (.env, .update, .gotenberg, .sh, .log, .json, .lock) im Skript-Wurzelordner sperren
         if [ ! -f "$htaccess_file" ] || ! grep -q "\.env" "$htaccess_file" 2>/dev/null; then
             cat <<'EOF' > "$htaccess_file"
 # Schutz für sensible Skript- und Konfigurationsdateien
-<FilesMatch "^(\.env|\.update|\.htaccess|.*\.sh|.*\.log|.*\.json|.*\.lock)$">
+<FilesMatch "^(\.env|\.update|\.gotenberg|\.htaccess|.*\.sh|.*\.log|.*\.json|.*\.lock)$">
     <IfModule mod_authz_core.c>
         Require all denied
     </IfModule>
@@ -681,6 +692,19 @@ function project_name_from_update_file() {
     echo "${file_basename#.update.}"
 }
 
+function load_gotenberg_config() {
+    local gotenberg_cfg="$basename/.gotenberg"
+    GOTENBERG_URL="${GOTENBERG_URL:-https://gotenberg.gregor-wendland.com}"
+    GOTENBERG_USER="${GOTENBERG_USER:-}"
+    GOTENBERG_PASS="${GOTENBERG_PASS:-}"
+    GOTENBERG_TIMEOUT="${GOTENBERG_TIMEOUT:-60}"
+
+    if [ -f "$gotenberg_cfg" ]; then
+        # shellcheck source=/dev/null
+        source "$gotenberg_cfg"
+    fi
+}
+
 # Schreibt eine .update.<projektname> Konfigurationsdatei
 function write_project_update_file() {
     local target_file="$1"
@@ -693,8 +717,11 @@ function write_project_update_file() {
     local max_age="${8:-60}"
     local backup_first="${9:-yes}"
     local enable_screenshots="${10:-yes}"
-    local screenshot_pages_count="${11:-3}"
-    local screenshot_method="${12:-mshots}"
+    local screenshot_paths="${11:-}"
+    local screenshot_widths="${12:-1440 390}"
+    local screenshot_wait="${13:-2s}"
+    local screenshot_cookies="${14:-}"
+    local screenshot_ignore_rects="${15:-}"
 
     cat <<EOF > "$target_file"
 # update_wp.sh Konfigurationsdatei für Projekt '$p_name'
@@ -724,13 +751,68 @@ RUN_BACKUP_FIRST="$backup_first"
 # Visuellen Screenshot-Vergleich vor und nach dem Update durchführen (yes/no)
 ENABLE_SCREENSHOTS="$enable_screenshots"
 
-# Anzahl zufälliger Unterseiten aus der Sitemap für den visuellen Screenshot-Vergleich (Standard: 3)
-SCREENSHOT_PAGES_COUNT="$screenshot_pages_count"
+# Zu prüfende Pfade für Screenshots (Standard: "/" + CHECK_PATHS)
+SCREENSHOT_PATHS="${screenshot_paths:-/ $check_paths}"
 
-# Methode zur Screenshot-Erstellung (mshots = WordPress/Automattic Dienst, local = headless browser)
-SCREENSHOT_METHOD="$screenshot_method"
+# Viewport-Breiten für Screenshots in CSS-Pixeln (Standard: "1440 390")
+SCREENSHOT_WIDTHS="$screenshot_widths"
+
+# Wartezeit vor Screenshot-Aufnahme in Gotenberg (Standard: "2s")
+SCREENSHOT_WAIT="$screenshot_wait"
+
+# Optionale Cookies im JSON-Format (z. B. für Cookie-Consent / Banner)
+# SCREENSHOT_COOKIES='[{"name":"cookie_consent","value":"accepted","domain":"example.com"}]'
+SCREENSHOT_COOKIES='$screenshot_cookies'
+
+# Optionale Ignore-Bereiche vor dem Bildvergleich (Format: "x,y,w,h;..." z. B. für dynamische Slider/Ticker)
+SCREENSHOT_IGNORE_RECTS='$screenshot_ignore_rects'
+
+# Warn- und Fehlerschwellen für visuelle Differenz in Prozent (<1% GRÜN, 1-5% GELB, >5% ROT)
+SCREENSHOT_DIFF_THRESHOLD_WARN="1.0"
+SCREENSHOT_DIFF_THRESHOLD_FAIL="5.0"
 EOF
     chmod 600 "$target_file" 2>/dev/null || true
+}
+
+# Richtet die zentrale Gotenberg-Konfiguration (.gotenberg) interaktiv ein
+function setup_gotenberg_wizard() {
+    load_gotenberg_config
+    local gotenberg_cfg="$basename/.gotenberg"
+
+    echo "--------------------------------------------------"
+    echo "Gotenberg 9 Screenshot-Dienst konfigurieren"
+    echo "--------------------------------------------------"
+    echo "Für visuelle Vorher-/Nachher-Prüfungen nutzt update_wp.sh"
+    echo "den Gotenberg 9 Screenshot-Dienst."
+    echo
+
+    read -rp "Gotenberg URL [$GOTENBERG_URL]: " in_url
+    GOTENBERG_URL="${in_url:-$GOTENBERG_URL}"
+
+    read -rp "Gotenberg Basic Auth Benutzer [$GOTENBERG_USER]: " in_user
+    GOTENBERG_USER="${in_user:-$GOTENBERG_USER}"
+
+    read -rsp "Gotenberg Basic Auth Passwort (Eingabe unsichtbar) [$([ -n "$GOTENBERG_PASS" ] && echo "***")]: " in_pass
+    echo
+    if [ -n "$in_pass" ]; then
+        GOTENBERG_PASS="$in_pass"
+    fi
+
+    read -rp "Gotenberg Timeout in Sekunden [$GOTENBERG_TIMEOUT]: " in_timeout
+    GOTENBERG_TIMEOUT="${in_timeout:-$GOTENBERG_TIMEOUT}"
+
+    cat <<EOF > "$gotenberg_cfg"
+# Gotenberg 9 Konfiguration für update_wp.sh
+# Angelegt am $(date +"%Y-%m-%d %H:%M:%S")
+
+GOTENBERG_URL='$GOTENBERG_URL'
+GOTENBERG_USER='$GOTENBERG_USER'
+GOTENBERG_PASS='$GOTENBERG_PASS'
+GOTENBERG_TIMEOUT='$GOTENBERG_TIMEOUT'
+EOF
+    chmod 600 "$gotenberg_cfg" 2>/dev/null || true
+    echo "-> Gespeichert als $gotenberg_cfg (chmod 600)"
+    echo
 }
 
 # Interaktiver Setup-Assistent
@@ -749,14 +831,25 @@ function run_setup_wizard() {
     ensure_webroot_protection "$basename/update-runs" "deny_all"
     ensure_webroot_protection "$basename/bin" "deny_all"
     ensure_webroot_protection "$basename/status" "deny_all"
+    ensure_webroot_protection "$basename" "sensitive_only"
 
     # Hinweis für Nginx-Umgebungen ausgeben
     echo "Hinweis zur Webroot-Sicherheit:"
     echo "  .htaccess-Schutzregeln wurden für Apache eingerichtet."
     echo "  Bei Nginx bitte sicherstellen, dass Verzeichnisse wie './bin/',"
-    echo "  './update-runs/', './status/' und Dateien wie '.update.*' sowie '.env.*'"
+    echo "  './update-runs/', './status/' und Dateien wie '.update.*', '.env.*' sowie '.gotenberg'"
     echo "  über die Nginx-Konfiguration ('deny all;') vor Webzugriff geschützt sind."
     echo
+
+    # Gotenberg-Konfiguration abfragen
+    if [ ! -f "$basename/.gotenberg" ]; then
+        setup_gotenberg_wizard
+    else
+        read -rp "Zentrale Gotenberg 9 Konfiguration anpassen? (y/N): " change_gotenberg
+        if [[ "$change_gotenberg" =~ ^[yYjJ] ]]; then
+            setup_gotenberg_wizard
+        fi
+    fi
 
     refresh_env_files "$basename"
     local available_projects=()
@@ -775,6 +868,8 @@ function run_setup_wizard() {
     fi
 
     local configured_count=0
+    local first_configured_url=""
+
     for proj in "${available_projects[@]}"; do
         local update_cfg="$basename/.update.$proj"
         local env_cfg="$basename/.env.$proj"
@@ -790,8 +885,11 @@ function run_setup_wizard() {
         local current_max_age="60"
         local current_backup_first="yes"
         local current_enable_screenshots="yes"
-        local current_screenshot_pages_count="3"
-        local current_screenshot_method="mshots"
+        local current_screenshot_paths="/ /kontakt/ /impressum/"
+        local current_screenshot_widths="1440 390"
+        local current_screenshot_wait="2s"
+        local current_screenshot_cookies=""
+        local current_screenshot_ignore_rects=""
 
         # Falls .env vorhanden, SOURCE_FILES_DIR als Pfadvorschlag laden
         if [ -f "$env_cfg" ]; then
@@ -812,8 +910,11 @@ function run_setup_wizard() {
             current_max_age="${BACKUP_MAX_AGE_MIN:-$current_max_age}"
             current_backup_first="${RUN_BACKUP_FIRST:-$current_backup_first}"
             current_enable_screenshots="${ENABLE_SCREENSHOTS:-$current_enable_screenshots}"
-            current_screenshot_pages_count="${SCREENSHOT_PAGES_COUNT:-$current_screenshot_pages_count}"
-            current_screenshot_method="${SCREENSHOT_METHOD:-$current_screenshot_method}"
+            current_screenshot_paths="${SCREENSHOT_PATHS:-$current_check_paths}"
+            current_screenshot_widths="${SCREENSHOT_WIDTHS:-$current_screenshot_widths}"
+            current_screenshot_wait="${SCREENSHOT_WAIT:-$current_screenshot_wait}"
+            current_screenshot_cookies="${SCREENSHOT_COOKIES:-$current_screenshot_cookies}"
+            current_screenshot_ignore_rects="${SCREENSHOT_IGNORE_RECTS:-$current_screenshot_ignore_rects}"
         fi
 
         read -rp "WordPress-Pfad (WP_PATH) [${current_wp_path:-../$proj}]: " in_wp_path
@@ -845,6 +946,7 @@ function run_setup_wizard() {
 
         read -rp "Website-URL (SITE_URL) [${current_site_url:-https://$proj.de}]: " in_site_url
         current_site_url="${in_site_url:-${current_site_url:-https://$proj.de}}"
+        [ -z "$first_configured_url" ] && first_configured_url="$current_site_url"
 
         read -rp "Erforderlicher Text auf der Startseite (MUST_CONTAIN) [${current_must_contain:-$proj}]: " in_must_contain
         current_must_contain="${in_must_contain:-${current_must_contain:-$proj}}"
@@ -869,14 +971,17 @@ function run_setup_wizard() {
         current_enable_screenshots="${in_enable_screenshots:-$current_enable_screenshots}"
 
         if [ "$current_enable_screenshots" == "yes" ]; then
-            read -rp "Anzahl zufälliger Sitemap-Seiten für Screenshot-Vergleich [$current_screenshot_pages_count]: " in_screenshot_pages_count
-            current_screenshot_pages_count="${in_screenshot_pages_count:-$current_screenshot_pages_count}"
+            read -rp "Screenshot-Pfade (SCREENSHOT_PATHS) [${current_screenshot_paths:-/ $current_check_paths}]: " in_screenshot_paths
+            current_screenshot_paths="${in_screenshot_paths:-${current_screenshot_paths:-/ $current_check_paths}}"
 
-            read -rp "Screenshot-Methode (mshots/local) [$current_screenshot_method]: " in_screenshot_method
-            current_screenshot_method="${in_screenshot_method:-$current_screenshot_method}"
+            read -rp "Screenshot-Breiten (SCREENSHOT_WIDTHS) [$current_screenshot_widths]: " in_screenshot_widths
+            current_screenshot_widths="${in_screenshot_widths:-$current_screenshot_widths}"
+
+            read -rp "Wartezeit vor Aufnahme (SCREENSHOT_WAIT) [$current_screenshot_wait]: " in_screenshot_wait
+            current_screenshot_wait="${in_screenshot_wait:-$current_screenshot_wait}"
         fi
 
-        write_project_update_file "$update_cfg" "$proj" "$current_wp_path" "$current_site_url" "$current_must_contain" "$current_check_paths" "$current_skip_plugins" "$current_max_age" "$current_backup_first" "$current_enable_screenshots" "$current_screenshot_pages_count" "$current_screenshot_method"
+        write_project_update_file "$update_cfg" "$proj" "$current_wp_path" "$current_site_url" "$current_must_contain" "$current_check_paths" "$current_skip_plugins" "$current_max_age" "$current_backup_first" "$current_enable_screenshots" "$current_screenshot_paths" "$current_screenshot_widths" "$current_screenshot_wait" "$current_screenshot_cookies" "$current_screenshot_ignore_rects"
         echo "-> Gespeichert als $update_cfg"
         configured_count=$((configured_count + 1))
     done
@@ -885,6 +990,13 @@ function run_setup_wizard() {
     echo "======================================"
     echo "$configured_count Konfiguration(en) eingerichtet."
     echo "======================================"
+    echo
+
+    if [ -n "$first_configured_url" ]; then
+        echo "Teste Gotenberg-Screenshot mit Startseite '$first_configured_url' ..."
+        test_gotenberg_connection "$first_configured_url"
+    fi
+
     return 0
 }
 
@@ -938,9 +1050,9 @@ function check_http_endpoint() {
 ################################
 ################################
 ################################
-## Visuelle Regression & Screenshot-Vergleich
+## Visuelle Regression & Gotenberg 9 Screenshot-Dienst
 
-# Prüft die Verfügbarkeit von Werkzeugen für den visuellen Screenshot-Vergleich
+# Prüft die Verfügbarkeit von Werkzeugen für den visuellen Bildvergleich (ImageMagick / PHP-GD)
 function check_screenshot_tools() {
     local log_target="${1:-/dev/null}"
     local has_imagemagick=0
@@ -961,174 +1073,189 @@ function check_screenshot_tools() {
         log_check_item "OK" "PHP-GD Erweiterung für visuellen Pixel-Vergleich verfügbar" "$log_target"
         return 0
     else
-        log_check_item "WARN" "Weder ImageMagick noch PHP-GD für visuellen Bildvergleich gefunden" "$log_target" "Für pixelgenaue Differenzbilder wird ImageMagick ('compare') oder die PHP-GD-Erweiterung empfohlen. Ohne diese Tools wird auf Dateigrößen-Heuristik zurückgegriffen oder der Screenshot-Vergleich kann in der Konfiguration deaktiviert werden."
+        log_check_item "WARN" "Weder ImageMagick noch PHP-GD für visuellen Bildvergleich gefunden" "$log_target" "Für pixelgenaue Differenzbilder wird ImageMagick ('compare') oder die PHP-GD-Erweiterung empfohlen. Ohne diese Tools wird auf Dateigrößen-Heuristik zurückgegriffen."
         return 1
     fi
 }
 
-# Findet URLs aus WordPress-Sitemaps und wählt eine Zufallsauswahl aus
-function discover_sitemap_urls() {
-    local site_url="$1"
-    local sample_count="${2:-3}"
-
-    [ -z "$site_url" ] && return 0
-    [ "$sample_count" -le 0 ] 2>/dev/null && return 0
-
-    local base_clean="${site_url%/}"
-    local candidate_sitemaps=(
-        "$base_clean/wp-sitemap.xml"
-        "$base_clean/sitemap_index.xml"
-        "$base_clean/sitemap.xml"
-    )
-
-    local raw_sitemap_content=""
-    local found_sitemap_url=""
-
-    for sm_url in "${candidate_sitemaps[@]}"; do
-        local resp=""
-        if command -v curl >/dev/null 2>&1; then
-            resp=$(curl -s -S -L -k --max-time 15 "$sm_url" 2>/dev/null || true)
-        elif command -v wget >/dev/null 2>&1; then
-            resp=$(wget -q -O - --no-check-certificate --timeout=15 "$sm_url" 2>/dev/null || true)
-        fi
-
-        if echo "$resp" | grep -q "<loc>" 2>/dev/null; then
-            raw_sitemap_content="$resp"
-            found_sitemap_url="$sm_url"
-            break
-        fi
-    done
-
-    if [ -z "$raw_sitemap_content" ]; then
-        return 0
-    fi
-
-    # Falls es sich um einen Sitemap-Index handelt (enthält Sub-Sitemaps wie wp-sitemap-posts-page-1.xml oder post-sitemap.xml)
-    if echo "$raw_sitemap_content" | grep -qi "<sitemap>" 2>/dev/null; then
-        local sub_sitemaps=()
-        while IFS= read -r sub_sm; do
-            [ -n "$sub_sm" ] && sub_sitemaps+=("$sub_sm")
-        done < <(echo "$raw_sitemap_content" | grep -oE '<loc>[^<]+</loc>' | sed -e 's/<loc>//g' -e 's/<\/loc>//g' | grep -vE '\.(jpg|png|pdf)$')
-
-        # Bevorzuge Post- oder Page-Sitemaps
-        local chosen_sub=""
-        for candidate_sub in "${sub_sitemaps[@]}"; do
-            if echo "$candidate_sub" | grep -qiE '(post|page|artikel|seite)'; then
-                chosen_sub="$candidate_sub"
-                break
-            fi
-        done
-        [ -z "$chosen_sub" ] && chosen_sub="${sub_sitemaps[0]:-}"
-
-        if [ -n "$chosen_sub" ]; then
-            if command -v curl >/dev/null 2>&1; then
-                raw_sitemap_content=$(curl -s -S -L -k --max-time 15 "$chosen_sub" 2>/dev/null || true)
-            elif command -v wget >/dev/null 2>&1; then
-                raw_sitemap_content=$(wget -q -O - --no-check-certificate --timeout=15 "$chosen_sub" 2>/dev/null || true)
-            fi
-        fi
-    fi
-
-    # URLs extrahieren und filtern
-    local all_urls=()
-    while IFS= read -r url_item; do
-        [ -z "$url_item" ] && continue
-        # Filtere Medien, XML, Feeds und Admin-Pfade heraus
-        if echo "$url_item" | grep -qiE '\.(xml|jpg|jpeg|png|gif|svg|webp|pdf|zip|gz|tar|css|js)$'; then
-            continue
-        fi
-        if echo "$url_item" | grep -qiE '(/feed/|/wp-json/|/wp-admin/|/wp-includes/|/author/)'; then
-            continue
-        fi
-        # Nicht Startseite
-        local url_item_clean="${url_item%/}"
-        if [ "$url_item_clean" == "$base_clean" ]; then
-            continue
-        fi
-        all_urls+=("$url_item")
-    done < <(echo "$raw_sitemap_content" | grep -oE '<loc>[^<]+</loc>' | sed -e 's/<loc>//g' -e 's/<\/loc>//g' | sort -u)
-
-    local total_found=${#all_urls[@]}
-    if [ "$total_found" -eq 0 ]; then
-        return 0
-    fi
-
-    # Zufällige Auswahl treffen (portable Auswahl via PHP, sort -R oder shuf)
-    if command -v php >/dev/null 2>&1; then
-        local php_sampler='
-            $lines = array_filter(explode("\n", trim(stream_get_contents(STDIN))));
-            if (empty($lines)) exit(0);
-            $count = (int)($argv[1] ?? 3);
-            shuffle($lines);
-            $selected = array_slice($lines, 0, $count);
-            foreach ($selected as $u) echo $u . "\n";
-        '
-        printf "%s\n" "${all_urls[@]}" | php -r "$php_sampler" "$sample_count" 2>/dev/null
-    elif command -v shuf >/dev/null 2>&1; then
-        printf "%s\n" "${all_urls[@]}" | shuf -n "$sample_count" 2>/dev/null
-    else
-        printf "%s\n" "${all_urls[@]}" | sort -R 2>/dev/null | head -n "$sample_count"
-    fi
-}
-
-# Erstellt einen Screenshot einer Website-URL
+# Erstellt einen Screenshot einer Website-URL über den zentralen Gotenberg 9 Dienst
+# Verwendet Basic Auth via stdin ('curl -K -'), sodass Zugangsdaten nicht in der Prozessliste erscheinen.
 function capture_screenshot() {
     local target_url="$1"
     local output_file="$2"
-    local method="${3:-mshots}" # 'mshots', 'local'
+    local width="${3:-1440}"
+    local wait_delay="${4:-2s}"
+    local cookies_json="${5:-}"
+    local log_target="${6:-/dev/null}"
 
     [ -z "$target_url" ] || [ -z "$output_file" ] && return 1
     mkdir -p "$(dirname "$output_file")" 2>/dev/null || true
 
-    if [ "$method" == "local" ]; then
-        if command -v shot-scraper >/dev/null 2>&1; then
-            shot-scraper "$target_url" -o "$output_file" --width 1280 --height 960 2>/dev/null && return 0
-        elif command -v chromium >/dev/null 2>&1; then
-            chromium --headless --disable-gpu --screenshot="$output_file" --window-size=1280,960 "$target_url" 2>/dev/null && return 0
-        elif command -v google-chrome >/dev/null 2>&1; then
-            google-chrome --headless --disable-gpu --screenshot="$output_file" --window-size=1280,960 "$target_url" 2>/dev/null && return 0
-        fi
-        # Fallback auf mshots
-        method="mshots"
+    load_gotenberg_config
+
+    local base_url="${GOTENBERG_URL%/}"
+    local endpoint="${base_url}/forms/chromium/screenshot/url"
+    local timeout="${GOTENBERG_TIMEOUT:-60}"
+
+    local curl_auth_cfg=""
+    if [ -n "$GOTENBERG_USER" ] || [ -n "$GOTENBERG_PASS" ]; then
+        curl_auth_cfg="user = \"${GOTENBERG_USER}:${GOTENBERG_PASS}\""
     fi
 
-    if [ "$method" == "mshots" ]; then
-        local encoded_url=""
-        if command -v php >/dev/null 2>&1; then
-            encoded_url=$(php -r 'echo rawurlencode($argv[1]);' "$target_url" 2>/dev/null)
-        else
-            encoded_url=$(echo "$target_url" | sed -e 's/:/%3A/g' -e 's/\//%2F/g' -e 's/\?/%3F/g' -e 's/&/%26/g' -e 's/=/%3D/g')
-        fi
+    local temp_out
+    temp_out="$(mktemp "${output_file}.tmp_XXXXXX" 2>/dev/null || echo "${output_file}.tmp_$$")"
 
-        local mshots_endpoint="https://s0.wp.com/mshots/v1/${encoded_url}?w=1280&h=960"
+    local curl_cmd=(
+        curl -s -S -k --max-time "$timeout"
+    )
 
-        # mshots erzeugt den Screenshot beim ersten Aufruf asynchron. Daher 1-2 Retries falls Platzhalter
-        local attempt=1
-        while [ "$attempt" -le 3 ]; do
-            if command -v curl >/dev/null 2>&1; then
-                curl -s -S -L -k --max-time 25 -o "$output_file" "$mshots_endpoint" 2>/dev/null || true
-            elif command -v wget >/dev/null 2>&1; then
-                wget -q -O "$output_file" --no-check-certificate --timeout=25 "$mshots_endpoint" 2>/dev/null || true
-            fi
+    if [ -n "$curl_auth_cfg" ]; then
+        curl_cmd+=(-K -)
+    fi
 
-            local f_size
-            f_size=$(get_file_size_bytes "$output_file")
-            # Ein valider Screenshot von mshots ist in der Regel > 4000 Bytes
-            if [ -f "$output_file" ] && [ "$f_size" -ge 4000 ]; then
-                return 0
-            fi
+    curl_cmd+=(
+        --request POST "$endpoint"
+        --form "url=$target_url"
+        --form "format=png"
+        --form "width=$width"
+        --form "waitDelay=$wait_delay"
+    )
 
-            attempt=$((attempt + 1))
-            [ "$attempt" -le 3 ] && sleep 2
-        done
+    if [ -n "$cookies_json" ]; then
+        curl_cmd+=(--form "cookies=$cookies_json")
+    fi
 
-        # Prüfen ob zumindest eine Datei erzeugt wurde (> 1000 Bytes)
-        if [ -f "$output_file" ] && [ "$(get_file_size_bytes "$output_file")" -gt 1000 ]; then
-            return 0
+    curl_cmd+=(-o "$temp_out")
+
+    local curl_err=""
+    if [ -n "$curl_auth_cfg" ]; then
+        curl_err=$(printf "%s" "$curl_auth_cfg" | "${curl_cmd[@]}" 2>&1)
+    else
+        curl_err=$("${curl_cmd[@]}" 2>&1)
+    fi
+
+    local curl_status=$?
+
+    # Validierung: Datei vorhanden, Größe > 100 Bytes, PNG-Magic-Bytes (89 50 4E 47 / \x89PNG)
+    local is_png=0
+    if [ $curl_status -eq 0 ] && [ -f "$temp_out" ] && [ -s "$temp_out" ]; then
+        local first_bytes
+        first_bytes=$(head -c 4 "$temp_out" 2>/dev/null)
+        if [ "$first_bytes" = $'\x89PNG' ]; then
+            is_png=1
+        elif command -v file >/dev/null 2>&1 && file "$temp_out" | grep -qi "PNG image"; then
+            is_png=1
+        elif command -v od >/dev/null 2>&1 && [ "$(od -A n -N 4 -t x1 "$temp_out" 2>/dev/null | tr -d ' ')" = "89504e47" ]; then
+            is_png=1
         fi
     fi
 
-    return 1
+    if [ $is_png -eq 1 ]; then
+        mv -f "$temp_out" "$output_file"
+        chmod 600 "$output_file" 2>/dev/null || true
+        return 0
+    else
+        local err_preview=""
+        if [ -f "$temp_out" ]; then
+            err_preview=$(head -n 2 "$temp_out" 2>/dev/null)
+            rm -f "$temp_out"
+        fi
+        if [ -n "$log_target" ] && [ "$log_target" != "/dev/null" ]; then
+            if [ -n "$err_preview" ]; then
+                echo "    [Gotenberg Fehler]: $err_preview" >> "$log_target"
+            elif [ -n "$curl_err" ]; then
+                echo "    [Curl Fehler]: $curl_err" >> "$log_target"
+            fi
+        fi
+        return 1
+    fi
+}
+
+# Testet die Verbindung zum Gotenberg 9 Dienst
+function test_gotenberg_connection() {
+    local test_url="${1:-https://example.com}"
+    echo "======================================"
+    echo "Gotenberg 9 Screenshot-Verbindungstest"
+    echo "======================================"
+    load_gotenberg_config
+
+    echo "Endpunkt: ${GOTENBERG_URL%/}/forms/chromium/screenshot/url"
+    echo "Benutzer: ${GOTENBERG_USER:-<keiner>}"
+    echo "Timeout:  ${GOTENBERG_TIMEOUT:-60}s"
+    echo "Test-URL: $test_url"
+    echo
+
+    local temp_file
+    temp_file="$(mktemp "/tmp/gotenberg_test_XXXXXX.png" 2>/dev/null || echo "/tmp/gotenberg_test_$$.png")"
+
+    echo "Sende Screenshot-Anfrage ..."
+    if capture_screenshot "$test_url" "$temp_file" "1440" "2s" "" "/dev/stderr"; then
+        local sz
+        sz=$(get_file_size_bytes "$temp_file")
+        log_check_item "OK" "Verbindung zu Gotenberg 9 erfolgreich! Screenshot empfangen ($sz Bytes, PNG)."
+        rm -f "$temp_file"
+        return 0
+    else
+        log_check_item "ALERT" "Verbindung zu Gotenberg 9 fehlgeschlagen oder ungültiges Bild empfangen."
+        echo
+        echo "Tipps zur Fehlerbehebung:"
+        echo "  1. Ist Gotenberg unter '$GOTENBERG_URL' erreichbar?"
+        echo "  2. Stimmen Benutzername und Passwort in .gotenberg?"
+        echo "  3. Kann Gotenberg die Ziel-URL '$test_url' erreichen?"
+        rm -f "$temp_file"
+        return 1
+    fi
+}
+
+# Maskiert Ignore-Rechtecke vor dem Bildvergleich
+function apply_ignore_rectangles() {
+    local img_file="$1"
+    local rects_str="$2"
+    local target_width="$3"
+
+    [ ! -f "$img_file" ] || [ -z "$rects_str" ] && return 0
+
+    local IFS=';'
+    read -ra rect_list <<< "$rects_str"
+    for r_entry in "${rect_list[@]}"; do
+        r_entry=$(echo "$r_entry" | tr -d ' ')
+        [ -z "$r_entry" ] && continue
+
+        local r_w=""
+        local r_coords="$r_entry"
+        if [[ "$r_entry" == *:* ]]; then
+            r_w="${r_entry%%:*}"
+            r_coords="${r_entry#*:}"
+            if [ -n "$target_width" ] && [ -n "$r_w" ] && [ "$r_w" != "$target_width" ]; then
+                continue
+            fi
+        fi
+
+        local rx ry rw rh
+        IFS=',' read -r rx ry rw rh <<< "$r_coords"
+        if [ -n "$rx" ] && [ -n "$ry" ] && [ -n "$rw" ] && [ -n "$rh" ]; then
+            local rx2=$((rx + rw))
+            local ry2=$((ry + rh))
+
+            if command -v mogrify >/dev/null 2>&1; then
+                mogrify -fill black -draw "rectangle $rx,$ry $rx2,$ry2" "$img_file" 2>/dev/null || true
+            elif command -v magick >/dev/null 2>&1; then
+                magick mogrify -fill black -draw "rectangle $rx,$ry $rx2,$ry2" "$img_file" 2>/dev/null || true
+            elif command -v php >/dev/null 2>&1 && php -r 'exit(extension_loaded("gd") ? 0 : 1);' >/dev/null 2>&1; then
+                local php_mask='
+                    $f = $argv[1]; $x = (int)$argv[2]; $y = (int)$argv[3]; $w = (int)$argv[4]; $h = (int)$argv[5];
+                    $im = @imagecreatefrompng($f);
+                    if ($im) {
+                        $black = imagecolorallocate($im, 0, 0, 0);
+                        imagefilledrectangle($im, $x, $y, $x + $w, $y + $h, $black);
+                        imagepng($im, $f);
+                        imagedestroy($im);
+                    }
+                '
+                php -r "$php_mask" "$img_file" "$rx" "$ry" "$rw" "$rh" 2>/dev/null || true
+            fi
+        fi
+    done
 }
 
 # Vergleicht zwei Screenshots und berechnet die Abweichung in Prozent (0.00 bis 100.00)
@@ -1275,12 +1402,30 @@ function run_update_for_project() {
     BACKUP_MAX_AGE_MIN="60"
     RUN_BACKUP_FIRST="yes"
     ENABLE_SCREENSHOTS="yes"
-    SCREENSHOT_PAGES_COUNT="3"
-    SCREENSHOT_METHOD="mshots"
+    SCREENSHOT_PATHS=""
+    SCREENSHOT_WIDTHS="1440 390"
+    SCREENSHOT_WAIT="2s"
+    SCREENSHOT_COOKIES=""
+    SCREENSHOT_IGNORE_RECTS=""
+    SCREENSHOT_DIFF_THRESHOLD_WARN="1.0"
+    SCREENSHOT_DIFF_THRESHOLD_FAIL="5.0"
+
+    local old_method="${SCREENSHOT_METHOD:-}"
+    local old_pages="${SCREENSHOT_PAGES_COUNT:-}"
+    unset SCREENSHOT_METHOD SCREENSHOT_PAGES_COUNT
 
     # Konfiguration laden
     # shellcheck source=/dev/null
     source "$update_cfg_file"
+
+    if [ -n "${SCREENSHOT_METHOD:-}" ] || [ -n "$old_method" ]; then
+        log_check_item "INFO" "Veraltete Option 'SCREENSHOT_METHOD' in $(basename "$update_cfg_file") wird ignoriert (Screenshots nutzen jetzt zentral Gotenberg 9)" "$run_log"
+        unset SCREENSHOT_METHOD
+    fi
+    if [ -n "${SCREENSHOT_PAGES_COUNT:-}" ] || [ -n "$old_pages" ]; then
+        log_check_item "INFO" "Veraltete Option 'SCREENSHOT_PAGES_COUNT' in $(basename "$update_cfg_file") wird ignoriert (Pfade werden über SCREENSHOT_PATHS definiert)" "$run_log"
+        unset SCREENSHOT_PAGES_COUNT
+    fi
 
     local final_status="gruen"
     local final_exitcode=0
@@ -1521,11 +1666,11 @@ function run_update_for_project() {
     local debug_log_lines_before=0
     [ -f "$debug_log_file" ] && debug_log_lines_before=$(wc -l < "$debug_log_file" 2>/dev/null || echo 0)
 
-    # Screenshots vor Update erfassen (Visuelle Regression)
+    # Screenshots vor Update erfassen (Visuelle Regression via Gotenberg 9)
     local do_screenshots="false"
-    local screenshot_urls=()
-    local screenshot_labels=()
+    local screenshot_tasks=() # Format: "URL|SLUG|LABEL|WIDTH"
     local screenshots_dir="$run_dir/screenshots"
+    local gotenberg_error_occurred="false"
 
     if [ "$ENABLE_SCREENSHOTS" == "yes" ] && [ "$cli_no_screenshots" != "true" ] && [ "$cli_dry_run" != "true" ]; then
         do_screenshots="true"
@@ -1534,56 +1679,58 @@ function run_update_for_project() {
         ensure_webroot_protection "$screenshots_dir" "deny_all"
 
         echo
-        echo "Erfasse Vorher-Screenshots für visuelle Regressionsprüfung ..." | tee -a "$run_log"
+        echo "Erfasse Vorher-Screenshots über Gotenberg 9 für visuelle Regressionsprüfung ..." | tee -a "$run_log"
 
-        # 1. Startseite
         local norm_site_url="${SITE_URL%/}"
-        screenshot_urls+=("$norm_site_url/")
-        screenshot_labels+=("Startseite")
-
-        # 2. CHECK_PATHS
-        for cp in "${paths_array[@]}"; do
-            [ "$cp" == "/" ] || [ -z "$cp" ] && continue
-            screenshot_urls+=("${norm_site_url}/${cp#/}")
-            screenshot_labels+=("Pfad $cp")
-        done
-
-        # 3. Zufällige Sitemap-Seiten
-        local sitemap_count="${SCREENSHOT_PAGES_COUNT:-3}"
-        if [ "$sitemap_count" -gt 0 ] 2>/dev/null; then
-            local sm_urls=()
-            while IFS= read -r sm_line; do
-                [ -n "$sm_line" ] && sm_urls+=("$sm_line")
-            done < <(discover_sitemap_urls "$norm_site_url" "$sitemap_count")
-
-            local sm_idx=1
-            for sm_u in "${sm_urls[@]}"; do
-                local duplicate=0
-                for existing_u in "${screenshot_urls[@]}"; do
-                    if [ "$existing_u" == "$sm_u" ] || [ "${existing_u%/}" == "${sm_u%/}" ]; then
-                        duplicate=1
-                        break
-                    fi
-                done
-                if [ "$duplicate" -eq 0 ]; then
-                    screenshot_urls+=("$sm_u")
-                    screenshot_labels+=("Sitemap-$sm_idx")
-                    sm_idx=$((sm_idx + 1))
-                fi
+        local shot_paths=()
+        if [ -n "$SCREENSHOT_PATHS" ]; then
+            read -ra shot_paths <<< "$SCREENSHOT_PATHS"
+        else
+            shot_paths=("/")
+            for cp in "${paths_array[@]}"; do
+                [ "$cp" == "/" ] || [ -z "$cp" ] && continue
+                shot_paths+=("$cp")
             done
         fi
 
-        local s_idx=0
-        for s_url in "${screenshot_urls[@]}"; do
-            local file_vorher="$screenshots_dir/page_${s_idx}_vorher.png"
-            local s_label="${screenshot_labels[$s_idx]}"
-            echo "  Erstelle Vorher-Screenshot für $s_label ($s_url) ..." | tee -a "$run_log"
-            if capture_screenshot "$s_url" "$file_vorher" "${SCREENSHOT_METHOD:-mshots}"; then
-                log_check_item "OK" "Vorher-Screenshot für $s_label erstellt ($(get_file_size_bytes "$file_vorher") Bytes)" "$run_log"
+        local shot_widths=()
+        read -ra shot_widths <<< "${SCREENSHOT_WIDTHS:-1440 390}"
+        [ "${#shot_widths[@]}" -eq 0 ] && shot_widths=("1440" "390")
+
+        for p_item in "${shot_paths[@]}"; do
+            local clean_p="${p_item#/}"
+            clean_p="${clean_p%/}"
+            local full_shot_url="$norm_site_url"
+            [ -n "$clean_p" ] && full_shot_url="$norm_site_url/$clean_p"
+            [ -z "$clean_p" ] && full_shot_url="$norm_site_url/"
+
+            local p_slug
+            if [ -z "$clean_p" ]; then
+                p_slug="home"
             else
-                log_check_item "WARN" "Vorher-Screenshot für $s_label konnte nicht erstellt werden" "$run_log"
+                p_slug=$(echo "$clean_p" | sed -e 's/[^a-zA-Z0-9_-]/_/g')
             fi
-            s_idx=$((s_idx + 1))
+
+            local p_label="$p_item"
+            [ "$p_item" == "/" ] && p_label="Startseite"
+
+            for w_val in "${shot_widths[@]}"; do
+                w_val="${w_val// /}"
+                [ -z "$w_val" ] && continue
+                screenshot_tasks+=("$full_shot_url|$p_slug|$p_label|$w_val")
+            done
+        done
+
+        for s_task in "${screenshot_tasks[@]}"; do
+            IFS='|' read -r s_url s_slug s_label s_width <<< "$s_task"
+            local file_vorher="$screenshots_dir/vorher_${s_slug}_${s_width}.png"
+            echo "  Erstelle Vorher-Screenshot für $s_label ($s_width px) ..." | tee -a "$run_log"
+            if capture_screenshot "$s_url" "$file_vorher" "$s_width" "${SCREENSHOT_WAIT:-2s}" "$SCREENSHOT_COOKIES" "$run_log"; then
+                log_check_item "OK" "Vorher-Screenshot für $s_label ($s_width px) erstellt ($(get_file_size_bytes "$file_vorher") Bytes)" "$run_log"
+            else
+                log_check_item "WARN" "Vorher-Screenshot für $s_label ($s_width px) fehlgeschlagen (Gotenberg nicht erreichbar oder ungültig)" "$run_log"
+                gotenberg_error_occurred="true"
+            fi
         done
     fi
 
@@ -1836,54 +1983,82 @@ function run_update_for_project() {
     if [ "$do_screenshots" == "true" ]; then
         echo
         echo "==================================================" | tee -a "$run_log"
-        echo "Führe visuellen Screenshot-Vergleich nach Update durch ..." | tee -a "$run_log"
+        echo "Führe visuellen Screenshot-Vergleich nach Update durch (Gotenberg 9) ..." | tee -a "$run_log"
         echo "==================================================" | tee -a "$run_log"
 
-        local s_idx=0
-        for s_url in "${screenshot_urls[@]}"; do
-            local file_vorher="$screenshots_dir/page_${s_idx}_vorher.png"
-            local file_nachher="$screenshots_dir/page_${s_idx}_nachher.png"
-            local file_diff="$screenshots_dir/page_${s_idx}_diff.png"
-            local s_label="${screenshot_labels[$s_idx]}"
+        local thresh_warn="${SCREENSHOT_DIFF_THRESHOLD_WARN:-1.0}"
+        local thresh_fail="${SCREENSHOT_DIFF_THRESHOLD_FAIL:-5.0}"
+
+        for s_task in "${screenshot_tasks[@]}"; do
+            IFS='|' read -r s_url s_slug s_label s_width <<< "$s_task"
+            local file_vorher="$screenshots_dir/vorher_${s_slug}_${s_width}.png"
+            local file_nachher="$screenshots_dir/nachher_${s_slug}_${s_width}.png"
+            local file_diff="$screenshots_dir/diff_${s_slug}_${s_width}.png"
+            local vorher_rel_path="screenshots/vorher_${s_slug}_${s_width}.png"
+            local nachher_rel_path="screenshots/nachher_${s_slug}_${s_width}.png"
+            local diff_rel_path="screenshots/diff_${s_slug}_${s_width}.png"
 
             if [ -f "$file_vorher" ]; then
-                echo "  Erstelle Nachher-Screenshot für $s_label ($s_url) ..." | tee -a "$run_log"
-                if capture_screenshot "$s_url" "$file_nachher" "${SCREENSHOT_METHOD:-mshots}"; then
+                echo "  Erstelle Nachher-Screenshot für $s_label ($s_width px) ..." | tee -a "$run_log"
+                if capture_screenshot "$s_url" "$file_nachher" "$s_width" "${SCREENSHOT_WAIT:-2s}" "$SCREENSHOT_COOKIES" "$run_log"; then
+                    local tmp_before tmp_after
+                    tmp_before="$(mktemp "/tmp/wp_s_bef_XXXXXX.png" 2>/dev/null || echo "/tmp/wp_s_bef_$$.png")"
+                    tmp_after="$(mktemp "/tmp/wp_s_aft_XXXXXX.png" 2>/dev/null || echo "/tmp/wp_s_aft_$$.png")"
+                    cp -f "$file_vorher" "$tmp_before" 2>/dev/null || true
+                    cp -f "$file_nachher" "$tmp_after" 2>/dev/null || true
+
+                    if [ -n "$SCREENSHOT_IGNORE_RECTS" ]; then
+                        apply_ignore_rectangles "$tmp_before" "$SCREENSHOT_IGNORE_RECTS" "$s_width"
+                        apply_ignore_rectangles "$tmp_after" "$SCREENSHOT_IGNORE_RECTS" "$s_width"
+                    fi
+
                     local diff_pct
-                    diff_pct=$(compare_screenshots "$file_vorher" "$file_nachher" "$file_diff")
+                    diff_pct=$(compare_screenshots "$tmp_before" "$tmp_after" "$file_diff")
+                    rm -f "$tmp_before" "$tmp_after" 2>/dev/null || true
+
                     local diff_float="${diff_pct:-0.00}"
+                    local is_fail=0
+                    local is_warn=0
 
-                    local diff_int
-                    diff_int=$(echo "$diff_float" | cut -d. -f1)
-                    diff_int=${diff_int:-0}
+                    if awk "BEGIN {exit ($diff_float > $thresh_fail ? 0 : 1)}" 2>/dev/null; then
+                        is_fail=1
+                    elif awk "BEGIN {exit ($diff_float >= $thresh_warn ? 0 : 1)}" 2>/dev/null; then
+                        is_warn=1
+                    fi
 
-                    local diff_rel_path="screenshots/page_${s_idx}_diff.png"
-                    local vorher_rel_path="screenshots/page_${s_idx}_vorher.png"
-                    local nachher_rel_path="screenshots/page_${s_idx}_nachher.png"
-
-                    if [ "$diff_int" -ge 20 ]; then
-                        log_check_item "ROT" "Visuelle Abweichung auf $s_label beträgt ${diff_float}% (Starke Layoutänderung / möglicher Fehler)!" "$run_log" "Differenzbild prüfen: $file_diff"
-                        status_reasons+=("Visuelle Abweichung auf $s_label beträgt ${diff_float}%")
+                    if [ "$is_fail" -eq 1 ]; then
+                        log_check_item "ROT" "Visuelle Abweichung auf $s_label ($s_width px) beträgt ${diff_float}% (Grenzwert: ${thresh_fail}%)!" "$run_log" "Differenzbild prüfen: $file_diff"
+                        status_reasons+=("Visuelle Abweichung auf $s_label ($s_width px) beträgt ${diff_float}%")
                         final_status="rot"
                         final_exitcode=2
-                        screenshot_results+=("{\"url\": \"$(json_escape "$s_url")\", \"label\": \"$(json_escape "$s_label")\", \"vorher\": \"$vorher_rel_path\", \"nachher\": \"$nachher_rel_path\", \"diff\": \"$diff_rel_path\", \"abweichung_prozent\": $diff_float, \"status\": \"rot\"}")
-                    elif [ "$diff_int" -ge 5 ]; then
-                        log_check_item "WARN" "Visuelle Abweichung auf $s_label beträgt ${diff_float}% (Mäßige Abweichung)" "$run_log" "Differenzbild prüfen: $file_diff"
-                        status_reasons+=("Visuelle Abweichung auf $s_label (${diff_float}%)")
+                        screenshot_results+=("{\"url\": \"$(json_escape "$s_url")\", \"label\": \"$(json_escape "$s_label")\", \"width\": $s_width, \"vorher\": \"$vorher_rel_path\", \"nachher\": \"$nachher_rel_path\", \"diff\": \"$diff_rel_path\", \"abweichung_prozent\": $diff_float, \"status\": \"rot\"}")
+                    elif [ "$is_warn" -eq 1 ]; then
+                        log_check_item "WARN" "Visuelle Abweichung auf $s_label ($s_width px) beträgt ${diff_float}% (Grenzwert: ${thresh_warn}%)" "$run_log" "Differenzbild prüfen: $file_diff"
+                        status_reasons+=("Visuelle Abweichung auf $s_label ($s_width px) beträgt ${diff_float}%")
                         [ "$final_exitcode" -lt 1 ] && final_exitcode=1
                         [ "$final_status" == "gruen" ] && final_status="gelb"
-                        screenshot_results+=("{\"url\": \"$(json_escape "$s_url")\", \"label\": \"$(json_escape "$s_label")\", \"vorher\": \"$vorher_rel_path\", \"nachher\": \"$nachher_rel_path\", \"diff\": \"$diff_rel_path\", \"abweichung_prozent\": $diff_float, \"status\": \"gelb\"}")
+                        screenshot_results+=("{\"url\": \"$(json_escape "$s_url")\", \"label\": \"$(json_escape "$s_label")\", \"width\": $s_width, \"vorher\": \"$vorher_rel_path\", \"nachher\": \"$nachher_rel_path\", \"diff\": \"$diff_rel_path\", \"abweichung_prozent\": $diff_float, \"status\": \"gelb\"}")
                     else
-                        log_check_item "OK" "Visuelle Prüfung für $s_label erfolgreich (Abweichung: ${diff_float}%)" "$run_log"
-                        screenshot_results+=("{\"url\": \"$(json_escape "$s_url")\", \"label\": \"$(json_escape "$s_label")\", \"vorher\": \"$vorher_rel_path\", \"nachher\": \"$nachher_rel_path\", \"diff\": \"$diff_rel_path\", \"abweichung_prozent\": $diff_float, \"status\": \"gruen\"}")
+                        log_check_item "OK" "Visuelle Prüfung für $s_label ($s_width px) erfolgreich (Abweichung: ${diff_float}%)" "$run_log"
+                        screenshot_results+=("{\"url\": \"$(json_escape "$s_url")\", \"label\": \"$(json_escape "$s_label")\", \"width\": $s_width, \"vorher\": \"$vorher_rel_path\", \"nachher\": \"$nachher_rel_path\", \"diff\": \"$diff_rel_path\", \"abweichung_prozent\": $diff_float, \"status\": \"gruen\"}")
                     fi
                 else
-                    log_check_item "WARN" "Nachher-Screenshot für $s_label konnte nicht geladen werden" "$run_log"
-                    screenshot_results+=("{\"url\": \"$(json_escape "$s_url")\", \"label\": \"$(json_escape "$s_label")\", \"vorher\": \"screenshots/page_${s_idx}_vorher.png\", \"nachher\": null, \"diff\": null, \"abweichung_prozent\": null, \"status\": \"fehler\"}")
+                    log_check_item "WARN" "Nachher-Screenshot für $s_label ($s_width px) konnte nicht geladen werden" "$run_log"
+                    gotenberg_error_occurred="true"
+                    screenshot_results+=("{\"url\": \"$(json_escape "$s_url")\", \"label\": \"$(json_escape "$s_label")\", \"width\": $s_width, \"vorher\": \"$vorher_rel_path\", \"nachher\": null, \"diff\": null, \"abweichung_prozent\": null, \"status\": \"fehler\"}")
                 fi
+            else
+                log_check_item "WARN" "Vorher-Screenshot für $s_label ($s_width px) fehlt - Vergleich übersprungen" "$run_log"
+                gotenberg_error_occurred="true"
             fi
-            s_idx=$((s_idx + 1))
         done
+
+        if [ "$gotenberg_error_occurred" == "true" ]; then
+            log_check_item "WARN" "Optik-Prüfung unvollständig: Screenshot-Dienst (Gotenberg) nicht erreichbar oder Antwort fehlerhaft" "$run_log"
+            status_reasons+=("Screenshot-Dienst nicht erreichbar")
+            [ "$final_exitcode" -lt 1 ] && final_exitcode=1
+            [ "$final_status" == "gruen" ] && final_status="gelb"
+        fi
     fi
 
     # 9. rollback.sh erzeugen
@@ -2090,8 +2265,9 @@ function run_main_menu() {
         echo "  2) Alle Projekte aktualisieren"
         echo "  3) Dry-Run (Verfügbare Updates prüfen)"
         echo "  4) Einrichtung / Setup-Assistent"
-        echo "  5) Letzte Läufe anzeigen"
-        echo "  6) Rollback-Befehle des letzten Laufs"
+        echo "  5) Gotenberg Screenshot-Verbindung testen"
+        echo "  6) Letzte Läufe anzeigen"
+        echo "  7) Rollback-Befehle des letzten Laufs"
         echo "  0) Beenden"
         echo "======================================"
         read -rp "Auswahl: " menu_choice
@@ -2113,9 +2289,19 @@ function run_main_menu() {
                 refresh_update_configs
                 ;;
             5)
-                show_last_runs
+                local test_u="https://example.com"
+                if [ "${#update_files[@]}" -gt 0 ]; then
+                    local site_url_preview=""
+                    site_url_preview=$(grep -E '^SITE_URL=' "${update_files[0]}" 2>/dev/null | cut -d'"' -f2)
+                    [ -n "$site_url_preview" ] && test_u="$site_url_preview"
+                fi
+                read -rp "Zu testende URL [$test_u]: " in_t_url
+                test_gotenberg_connection "${in_t_url:-$test_u}"
                 ;;
             6)
+                show_last_runs
+                ;;
+            7)
                 show_last_rollback_commands
                 ;;
             0)
@@ -2129,7 +2315,30 @@ function run_main_menu() {
     done
 }
 
-# Selbstinstallation beim ersten Aufruf oder bei --setup
+# Selbstinstallation beim ersten Aufruf oder bei --setup / --test-screenshot
+if [ "$cli_test_screenshot" == "true" ]; then
+    test_target="${cli_test_screenshot_url:-}"
+    if [ -z "$test_target" ] && [ -n "$cli_project" ] && [ "$cli_project" != "alle" ]; then
+        match_file="$basename/.update.$cli_project"
+        if [ -f "$match_file" ]; then
+            # shellcheck source=/dev/null
+            source "$match_file"
+            test_target="$SITE_URL"
+        fi
+    fi
+    if [ -z "$test_target" ]; then
+        refresh_update_configs
+        if [ "${#update_files[@]}" -gt 0 ]; then
+            # shellcheck source=/dev/null
+            source "${update_files[0]}"
+            test_target="$SITE_URL"
+        fi
+    fi
+    test_target="${test_target:-https://example.com}"
+    test_gotenberg_connection "$test_target"
+    exit $?
+fi
+
 if [ "$cli_setup" == "true" ] || [ "$cli_update_wpcli" == "true" ]; then
     if [ "$cli_update_wpcli" == "true" ]; then
         echo "Aktualisiere WP-CLI ..."

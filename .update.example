@@ -1,0 +1,29 @@
+# .update.example - Beispiel-Konfiguration für update_wp.sh
+# Kopieren nach .update.<projektname> (z.B. .update.kundeA) und Rechte auf 600 setzen:
+#   cp .update.example .update.kundeA
+#   chmod 600 .update.kundeA
+
+# Absoluter oder relativer Pfad (relativ zum Skriptordner) zum WordPress-Wurzelverzeichnis
+WP_PATH="../kundeA"
+
+# Öffentliche URL der Website für automatisierte Vor- und Nachprüfungen per HTTP
+SITE_URL="https://kundeA.de"
+
+# Text / Schlagwort, das zwingend auf der Startseite vorkommen muss (z.B. Firmenname oder Blogtitel)
+# Fehlt dieser Text, schlägt die Vor-/Nachprüfung fehl (Schutz vor "White Screen of Death" oder Wartungsfehlern)
+MUST_CONTAIN="Kunde A Webpräsenz"
+
+# Pfade, die vor und nach dem Update per HTTP auf Status 200 und Antwortzeit geprüft werden
+# Durch Leerzeichen getrennt (z.B. "/ /kontakt/ /impressum/ /shop/")
+CHECK_PATHS="/ /kontakt/ /impressum/"
+
+# Plugins, die beim automatischen Update ausgeschlossen werden sollen (z.B. kommerzielle Plugins ohne WP.org-Updatequelle)
+# Durch Leerzeichen getrennt (z.B. "wp-all-import-pro custom-gateway-plugin")
+SKIP_PLUGINS=""
+
+# Maximales Alter eines vorhandenen Backups in Minuten, falls kein neues erstellt wird (Standard: 60)
+BACKUP_MAX_AGE_MIN="60"
+
+# Vor dem Update automatisch ein vollständiges Backup via backup_full_db_files_zip.sh ausführen (yes / no)
+# Bei "yes" wird das Update NUR fortgesetzt, wenn das Backup mit Exitcode 0 oder 1 (mit verifizierten Dateien) beendet wurde.
+RUN_BACKUP_FIRST="yes"

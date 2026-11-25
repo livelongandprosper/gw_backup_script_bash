@@ -1,8 +1,44 @@
-# Backup scripts #
+# Backup & WordPress Update Scripts #
 
 Free to use. Feedback is welcome: Gregor Wendland, hello@gregor-wendland.com, https://gregor-wendland.com/anfrage-an-webentwickler/
 
 Eine Übersicht aller Versionsänderungen und Neuerungen befindet sich im [CHANGELOG.md](CHANGELOG.md).
+
+---
+
+## Einrichtung bei einem neuen Kunden in 3 Schritten ##
+
+Die Einrichtung auf einem neuen Shared-Hosting-Account oder Server erfolgt in drei einfachen Schritten ohne Root-Rechte:
+
+1. **Repo-Ordner hochladen**
+   Den Skript-Ordner per SSH, Git oder SFTP auf den Server in das gewünschte Verzeichnis legen (z.B. `~/scripts/` oder neben die Website-Verzeichnisse):
+   ```bash
+   cd ~/scripts
+   chmod +x backup_full_db_files_zip.sh update_wp.sh
+   ```
+
+2. **WordPress-Installationen automatisch scannen & Backups einrichten**
+   ```bash
+   ./backup_full_db_files_zip.sh --scan-wp
+   ```
+   *Durchsucht den übergeordneten Ordner nach WordPress-Installationen, liest Datenbank-Zugangsdaten aus `wp-config.php` aus, schlägt Projektnamen vor und legt `.env.<projekt>` (chmod 600) an.*
+
+3. **Update-Verwaltung & WP-CLI initialisieren**
+   ```bash
+   ./update_wp.sh --setup
+   ```
+   *Prüft PHP-CLI und Tools, lädt bei Bedarf WP-CLI automatisch nach `./bin/` herunter (inkl. SHA-512 Prüfung) und erzeugt `.update.<projekt>` mit Prüfpfaden, Blognamen und Rollback-Vorgaben.*
+
+Fertig! Danach können Backups und Updates jederzeit interaktiv per Menü oder automatisiert per CLI/SSH aufgerufen werden:
+```bash
+# Backup ausführen:
+./backup_full_db_files_zip.sh --project=kundeA
+
+# WordPress-Updates sicher ausführen (mit Backup, Vor-/Nachprüfung und Rollback-Skript):
+./update_wp.sh --project=kundeA
+```
+
+---
 
 ## backup_full_db_files_zip.sh ##
 - Dateien werden gezipt, Datenbankdump mit mysqldump erstellt und gezipt
@@ -15,6 +51,19 @@ Eine Übersicht aller Versionsänderungen und Neuerungen befindet sich im [CHANG
   - liest Datenbankzugangsdaten (DB_NAME, DB_USER, DB_PASSWORD, DB_HOST) direkt aus der `wp-config.php` aus
   - schlägt Projektnamen / Basisdateinamen anhand von Domain (`WP_HOME`/`WP_SITEURL`) oder Ordnernamen vor
   - richtet auf Wunsch automatisch empfohlene WordPress-Ausschlussregeln (Cache, Backups, .git) ein
+- **Selbstprüfung direkt nach dem Backup (`verify_backup`)**:
+  - jede erzeugte ZIP-Datei wird mit `unzip -tq` auf Integrität getestet
+  - Datenbankdumps werden auf mysqldump-Kopfzeile, `-- Dump completed`-Abschluss und WordPress-Tabellen (`<prefix>options`, `<prefix>posts`) geprüft
+  - Dateigröße wird mit dem vorherigen Backup verglichen (> 30 % Abweichung erzeugt eine Warnung)
+  - die Prüfung läuft VOR einem optionalen Löschen nach Übertragung (`DELETE_IF_TRANSMITTED`)
+- **Ehrliche Exit-Codes**:
+  - `0` = Alles in Ordnung
+  - `1` = Warnungen (z.B. Übertragung fehlgeschlagen, aber lokale Backups intakt; Größenabweichung > 30 %)
+  - `2` = Fehler (Dump oder Datei-ZIP fehlt/defekt; mysqldump/zip fehlgeschlagen)
+- **Maschinenlesbarer Status & CLI-JSON**:
+  - nach jedem Lauf wird `status/<PROJEKT>.last.json` geschrieben
+  - `--json` gibt den Status als reines JSON auf `stdout` aus (restliche Ausgaben auf `stderr`)
+- **Optionaler Quiet-Modus**: `--quiet` / `-q` gibt nur Fehler und die Zusammenfassung aus
 - pro Lauf frei wählbar: alle Projekte oder nur ein bestimmtes, und alles/nur Datenbank(en)/nur Dateien
 - Backup-Dateien werden in ein Projekt-Verzeichnis gespeichert
 - Speichern der Backup-Dateien via sftp oder rsync möglich
@@ -22,6 +71,34 @@ Eine Übersicht aller Versionsänderungen und Neuerungen befindet sich im [CHANG
 - eine gesicherte Datenbank kann interaktiv wieder eingespielt werden (`--restore`)
 - beim Einrichten eines Projekts kann optional die Größe des zu sichernden Datenordners angezeigt werden
 - beim Aufruf ohne Parameter im Terminal erscheint ein interaktives Hauptmenü mit allen Aktionen
+
+---
+
+## update_wp.sh ##
+
+Neues Skript zur sicheren Durchführung von WordPress Core-, Plugin-, Theme- und Sprachdateien-Updates:
+
+- **Selbstinstallation & WP-CLI**:
+  - prüft PHP-CLI und Systemtools
+  - nutzt `wp` aus dem `PATH` oder lädt automatisch `./bin/wp-cli.phar` herunter (inkl. SHA-512 Hash-Prüfung)
+  - `--update-wpcli` aktualisiert WP-CLI bei Bedarf
+- **Sicherer Ablauf pro Projekt (`--project=<name>|alle`)**:
+  1. Lock-Datei pro Projekt verhindert parallele Ausführung
+  2. **Vorprüfung**: `wp core is-installed`, kein Wartungsmodus, HTTP-Status 200 auf allen Prüfseiten und Vorkommen von `MUST_CONTAIN` auf der Startseite. Bei Vorfehlern sofortiger Abbruch (ROT = "schon vorher defekt")
+  3. **Backup-Pflicht**: Führt vor dem Update `./backup_full_db_files_zip.sh --project=<name> --scope=alles --json` aus. Fortsetzung nur bei Exitcode 0 oder 1 (mit verifizierten Dateien). Bei `--no-backup` wird ein vorhandenes Backup verlangt, das jünger als `BACKUP_MAX_AGE_MIN` (Standard: 60 Min) und Status "ok" ist
+  4. **Stand vorher sichern**: Core-Version, Plugin-/Theme-Listen (`--format=json`), Zeilenzahlen der Logs und HTTP-Antwortzeiten werden in `update-runs/<projekt>/<datum>/` archiviert
+  5. **Updates**: Core, Core-DB, Plugins (unter Ausschluss von `SKIP_PLUGINS`), Themes, Sprachen und Cache-Flush. Ein Einzelfehler stoppt Folgeschritte nicht
+  6. **Nachprüfung (Post-Check)**: `wp core verify-checksums`, Plugin-/Theme-Versionsdiff, Prüfung auf neue Log-Zeilen und Fatal Errors, HTTP-Status 200, `MUST_CONTAIN`, Fehlertext-Erkennung und Antwortzeit-Vergleich
+  7. **Ampel-Status & Exit-Codes**:
+     - **GRÜN (0)**: Alle Updates und Prüfungen bestanden
+     - **GELB (1)**: Einzelne Updates übersprungen/fehlgeschlagen, neue Notices/Warnungen im Log oder Antwortzeit > 2× verlangsamt
+     - **ROT (2)**: Backup nicht OK, HTTP ≠ 200, Fatal Error, Checksummen falsch oder `core update-db` fehlgeschlagen
+  8. **Automatisches Rollback-Skript**:
+     - erzeugt `update-runs/<projekt>/<datum>/rollback.sh` mit exakten Downgrade-Befehlen für alle geänderten Plugins/Themes/Core sowie Hinweisen zum Restore via `backup_full_db_files_zip.sh --restore`
+- **Parameter & Menü**:
+  - Ohne Parameter: Interaktives Hauptmenü (Projekt aktualisieren, alle, Dry-Run, Setup, letzte Läufe, Rollback-Befehle)
+  - CLI: `--project=`, `--dry-run`, `--no-backup`, `--only=core|plugins|themes|languages`, `--setup`, `--update-wpcli`, `--json`, `--help`
+  - Automatische Bereinigung von Update-Runs älter als 90 Tage
 
 ### Einrichtung / Zugangsdaten ###
 Das Skript kann für beliebig viele Projekte im selben Ordner verwendet werden. Jedes

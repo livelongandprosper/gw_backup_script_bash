@@ -2,7 +2,14 @@
 .env
 .env.*
 !.env.example
+.update.*
+!.update.example
 /log/
 *.log
+/status/
+/update-runs/
+/bin/
+*.lock
 .*_sftp_upload_batchfile*
 *_sftp_upload_batchfile*
+.htaccess

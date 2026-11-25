@@ -7,6 +7,37 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
 
 ---
 
+## [2.1.0] - 2026-11-25
+
+### Hinzugefügt
+- **Neues WordPress-Update-Skript (`update_wp.sh`):**
+  - Automatisierte und sichere Aktualisierung von WordPress Core, Datenbank-Schema, Plugins, Themes und Sprachdateien.
+  - **Selbstinstallation & WP-CLI:** Automatische Erkennung oder Download von WP-CLI nach `./bin/wp-cli.phar` mit SHA-512 Hash-Prüfung und `--update-wpcli`.
+  - **Vorprüfungen (Pre-Check):** Verifikation von `wp core is-installed`, Abwesenheit von `.maintenance`, HTTP-Status 200 und Vorhandensein von `MUST_CONTAIN` auf der Startseite. Bricht bei Vorschäden sofort sicher ab (ROT).
+  - **Backup-Sicherheitsnetz:** Automatischer Aufruf von `backup_full_db_files_zip.sh` vor jedem Update. Fortsetzung nur bei erfolgreichem, verifiziertem Backup.
+  - **Umfassender Post-Check:** Prüfung von `wp core verify-checksums`, Versions-Diffs, Log-Analyse auf Fatal Errors, HTTP-Status 200 und Antwortzeitvergleich.
+  - **Ampel-System & Exit-Codes:** 0 = GRÜN (Erfolg), 1 = GELB (Warnungen/Verlangsamung), 2 = ROT (Fehler/Abbruch).
+  - **Automatisches Rollback-Skript:** Generierung von `update-runs/<projekt>/<datum>/rollback.sh` mit gezielten Downgrade-Befehlen und Restore-Anleitung.
+  - **Interaktives Menü & CLI-Parameter:** `--project=`, `--dry-run`, `--no-backup`, `--only=`, `--setup`, `--update-wpcli`, `--json`, `--help`.
+- **Selbstprüfung für Backups (`verify_backup` in `backup_full_db_files_zip.sh`):**
+  - Jede erzeugte ZIP-Datei wird vor der Übertragung oder Löschung mit `unzip -tq` getestet.
+  - Datenbank-Dumps werden auf mysqldump-Header, `-- Dump completed`-Abschluss und (bei WordPress) auf die Tabellen `<prefix>options` und `<prefix>posts` validiert.
+  - Automatischer Größenvergleich mit vorherigen Backups desselben Projekts (> 30 % Abweichung erzeugt eine Warnung).
+- **Maschinenlesbarer Status & JSON-Export:**
+  - Speicherung von `status/<PROJEKT_BASIS_DATEINAME>.last.json` nach jedem Backup-Lauf.
+  - Neuer Parameter `--json` zur reinen JSON-Ausgabe auf `stdout` (Logs und Banner auf `stderr`).
+- **Ehrliche Exit-Codes im Backup-Skript:**
+  - `0` = Alles in Ordnung.
+  - `1` = Warnungen (z.B. Remote-Transfer fehlgeschlagen, Backups lokal intakt; Größenabweichung > 30 %).
+  - `2` = Fehler (Dump oder Datei-ZIP fehlt/defekt; mysqldump/zip fehlgeschlagen).
+  - Bei `--project=alle` gilt der schlechteste Status aller Projekte.
+- **Gemeinsame Bibliothek (`lib_common.sh`):**
+  - Wiederverwendbare Funktionen für JSON-Escaping, wp-config-Parsing, Webroot-Schutz, Pfadauflösung und Farbformatierung.
+- **Neuer Parameter `--quiet` / `-q`:**
+  - Unterdrückt normale Informationsausgaben und gibt nur Fehler und die Zusammenfassung aus.
+
+---
+
 ## [2.0.0] - 2026-11-18
 
 ### Hinzugefügt

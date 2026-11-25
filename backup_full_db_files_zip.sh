@@ -1,10 +1,16 @@
 #!/bin/bash
-basename=$(cd "$(dirname "$0")" && pwd)
+basename=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 set -o pipefail
 umask 077
 
+# Gemeinsame Bibliothek einbinden (falls vorhanden)
+if [ -f "$basename/lib_common.sh" ]; then
+    # shellcheck source=/dev/null
+    source "$basename/lib_common.sh"
+fi
+
 # Farbdefinitionen für interaktive Terminalausgabe (wird für Log-Dateien automatisch bereinigt)
-if [ -t 1 ]; then
+if [ -t 1 ] && [ -z "${CLR_RESET+x}" ]; then
     CLR_RESET=$'\033[0m'
     CLR_BOLD=$'\033[1m'
     CLR_GREEN=$'\033[0;32m'
@@ -13,7 +19,7 @@ if [ -t 1 ]; then
     CLR_BLUE=$'\033[0;34m'
     CLR_CYAN=$'\033[0;36m'
     CLR_GRAY=$'\033[0;90m'
-else
+elif [ -z "${CLR_RESET+x}" ]; then
     CLR_RESET=''
     CLR_BOLD=''
     CLR_GREEN=''
@@ -28,18 +34,26 @@ before=$(date +%s)
 
 ###
 # BackupScript zum Backup von Websites
-# Version: 2.0.0
+# Version: 2.1.0
 #
 # - Dateien einer Website
 # - - optional können Dateien ausgeschlossen werden (SOURCE_FILES_DIR_IGNORE)
 # - Datenbank(en) einer Website
 # - Automatische WordPress-Erkennung & wp-config-Import
+# - Automatische Integritäts- und Strukturselbstprüfung (verify_backup)
+# - Maschinenlesbare Statusdateien (<scriptordner>/status/<PROJEKT>.last.json)
 # - Backup-Dateien können an entfernten Server via sftp oder rsync übertragen werden
 #
 # Dieses eine Skript kann für beliebig viele Projekte im selben Ordner verwendet werden.
 # Jedes Projekt bekommt seine eigene Konfigurationsdatei nach dem Muster .env.<projektname>
 # (z.B. .env.kundeA, .env.kundeB, ...). Eine alte einzelne .env-Datei (ohne Projektnamen)
 # wird weiterhin als "default"-Projekt unterstützt.
+#
+# Exit-Codes:
+#   0 = Alles erfolgreich (Backups erstellt, geprüft und ggf. übertragen)
+#   1 = Warnungen (z.B. Übertragung fehlgeschlagen, Backups lokal aber vorhanden; Größenabweichung > 30 %)
+#   2 = Fehler (ein DB-Dump oder das Datei-ZIP fehlt/ist defekt; mysqldump/zip fehlgeschlagen)
+#   Bei --project=alle gilt der schlechteste Status aller Projekte.
 #
 # (c) Gregor Wendland 2017-2026 /// free to use, free to change, do what you want with this file, no warranty
 ###
@@ -60,11 +74,13 @@ before=$(date +%s)
 #       -> sichert nur das Projekt "kundeA" ohne Menü (existiert keine .env.kundeA, wird der Setup-Assistent dafür gestartet)
 #   ./backup_full_db_files_zip.sh --project=alle --scope=db
 #       -> sichert bei allen konfigurierten Projekten nur die Datenbank(en) (z.B. für Cronjobs)
+#   ./backup_full_db_files_zip.sh --project=kundeA --json
+#       -> sichert "kundeA", gibt Ausgaben nach stderr und das Status-JSON auf stdout aus
 #   ./backup_full_db_files_zip.sh --restore --project=kundeA
 #       -> stellt interaktiv eine Datenbank des Projekts "kundeA" aus einem vorhandenen Backup wieder her
 #
 # Wird das Skript ohne jegliche Parameter in einem Terminal aufgerufen, erscheint immer
-# das interaktive Hauptmenü. Werden Parameter übergeben (z.B. --project/--scope/--restore),
+# das interaktive Hauptmenü. Werden Parameter übergeben (z.B. --project/--scope/--restore/--json),
 # wird das Menü übersprungen und direkt wie angegeben verfahren - das hält Cronjobs unangetastet.
 #
 ###
@@ -80,6 +96,8 @@ restore_mode='false'
 check_mode='false'
 cli_scan_wp='false'
 cli_scan_wp_path=''
+cli_json='false'
+cli_quiet='false'
 
 for cli_arg in "$@"; do
     case "$cli_arg" in
@@ -111,14 +129,33 @@ for cli_arg in "$@"; do
             cli_scan_wp='true'
             cli_scan_wp_path="${cli_arg#*=}"
             ;;
+        --json)
+            cli_json='true'
+            ;;
+        --quiet|-q)
+            cli_quiet='true'
+            ;;
         --help|-h)
-            echo "Verwendung: $0 [--project=<name>|alle] [--scope=alles|db|dateien] [--restore] [--check] [--scan-wp[=<ordner>]]"
-            echo "  --project   Projekt-Konfiguration (.env.<name>), die verwendet werden soll. 'alle' verarbeitet alle gefundenen Projekte."
-            echo "  --scope     Was gesichert werden soll: alles (Standard), db (nur Datenbank(en)) oder dateien (nur Website-Dateien)."
-            echo "  --restore   Datenbank aus einem vorhandenen Backup wiederherstellen (interaktiv), statt ein Backup zu erstellen."
-            echo "  --check     Führt Pre-Backup & Sicherheitsprüfungen für das Projekt durch, ohne ein Backup zu erstellen."
-            echo "  --scan-wp   Sucht nach WordPress-Installationen in <ordner> (Standard: ..) und richtet diese interaktiv ein."
-            echo "Ohne Parameter wird im Terminal das interaktive Hauptmenü angezeigt."
+            echo "Verwendung: $0 [OPTIONEN]"
+            echo
+            echo "Optionen:"
+            echo "  --project=<name>|alle   Projekt-Konfiguration (.env.<name>), die verwendet werden soll."
+            echo "                          'alle' verarbeitet nacheinander alle gefundenen Projekte."
+            echo "  --scope=alles|db|dateien Was gesichert werden soll: alles (Standard), db oder dateien."
+            echo "  --restore               Datenbank aus vorhandenem Backup wiederherstellen (interaktiv)."
+            echo "  --check|--pre-check     Pre-Backup & Sicherheitsprüfungen für das Projekt durchführen."
+            echo "  --scan-wp[=<ordner>]    Sucht nach WordPress-Installationen (Standard: ..) und richtet .env ein."
+            echo "  --json                  Gibt am Ende den Laufstatus als JSON auf stdout aus."
+            echo "                          Fortschritts- und Logausgaben werden nach stderr umgeleitet."
+            echo "  --quiet, -q             Unterdrückt normale Informationsausgaben (nur Fehler/Zusammenfassung)."
+            echo "  --help, -h              Zeigt diesen Hilfetext an."
+            echo
+            echo "Exit-Codes:"
+            echo "  0 = Alles in Ordnung (Backups erfolgreich erstellt und verifiziert)"
+            echo "  1 = Warnungen (z. B. Übertragung fehlgeschlagen, aber lokale Backups vorhanden)"
+            echo "  2 = Fehler (ein DB-Dump oder Datei-ZIP fehlt, ist beschädigt oder Abbruch)"
+            echo
+            echo "Ohne Parameter im Terminal wird das interaktive Hauptmenü angezeigt."
             exit 0
             ;;
         *)
@@ -126,6 +163,19 @@ for cli_arg in "$@"; do
             ;;
     esac
 done
+
+# Wenn --json aktiv ist, leiten wir alle normalen Ausgaben (stdout) nach stderr um,
+# damit stdout sauber für das finale JSON-Objekt / -Array reserviert bleibt.
+if [ "$cli_json" == "true" ]; then
+    exec 3>&1
+    exec 1>&2
+fi
+
+# Wenn --quiet aktiv ist (und nicht --json), unterdrücken wir Standardausgaben
+if [ "$cli_quiet" == "true" ] && [ "$cli_json" != "true" ]; then
+    exec 4>&1
+    exec 1>/dev/null
+fi
 
 # normalisiert Eingaben für den Umfang auf 'alles' / 'db' / 'dateien'
 function normalize_scope() {
@@ -1882,6 +1932,97 @@ fi
 ################################
 ## Funktionen für den eigentlichen Backup-Ablauf
 
+# Führt eine umfassende Selbstprüfung eines erzeugten Backups durch
+#  parameter1: Pfad zur Backup-Datei
+#  parameter2: Typ ("db" oder "files")
+#  parameter3: DB-Name (nur bei Typ "db")
+#  parameter4: WordPress Tabellen-Präfix (falls vorhanden, z.B. "wp_")
+#  parameter5: Pfad zu einem vorherigen Backup (für Größenvergleich)
+#  parameter6: Log-Zieldatei
+function verify_backup() {
+    local target_file="$1"
+    local file_type="$2"
+    local db_name="${3:-}"
+    local wp_prefix="${4:-}"
+    local prev_file="${5:-}"
+    local log_target="${6:-/dev/null}"
+
+    if [ ! -f "$target_file" ] || [ ! -s "$target_file" ]; then
+        echo "FEHLER: Backup-Datei '$target_file' existiert nicht oder ist leer!" | tee -a "$log_target" >&2
+        return 2
+    fi
+
+    # 1. ZIP-Integrität prüfen
+    if [[ "$target_file" == *.zip ]]; then
+        if ! unzip -tq "$target_file" >> "$log_target" 2>&1; then
+            echo "FEHLER: ZIP-Integritätsprüfung für '$target_file' fehlgeschlagen (unzip -tq)!" | tee -a "$log_target" >&2
+            return 2
+        fi
+    fi
+
+    # 2. Spezifische DB-Dump-Prüfungen
+    if [ "$file_type" == "db" ]; then
+        local dump_head=""
+        local dump_tail=""
+        if [[ "$target_file" == *.zip ]]; then
+            dump_head=$(unzip -p "$target_file" 2>/dev/null | head -n 40)
+            dump_tail=$(unzip -p "$target_file" 2>/dev/null | tail -n 40)
+        else
+            dump_head=$(head -n 40 "$target_file" 2>/dev/null)
+            dump_tail=$(tail -n 40 "$target_file" 2>/dev/null)
+        fi
+
+        # mysqldump Kopfzeile prüfen
+        if ! echo "$dump_head" | grep -qE -- "(-- MySQL dump|-- MariaDB dump|mysqldump|-- Host:)"; then
+            echo "FEHLER: Datenbankdump '$target_file' enthält keine gültige mysqldump-Kopfzeile!" | tee -a "$log_target" >&2
+            return 2
+        fi
+
+        # Abschlusszeile prüfen
+        if ! echo "$dump_tail" | grep -q -- "-- Dump completed"; then
+            echo "FEHLER: Datenbankdump '$target_file' ist unvollständig (kein '-- Dump completed' am Ende)!" | tee -a "$log_target" >&2
+            return 2
+        fi
+
+        # Falls WordPress erkannt: Prüfen auf <prefix>options und <prefix>posts
+        if [ -n "$wp_prefix" ]; then
+            local has_options=""
+            local has_posts=""
+            if [[ "$target_file" == *.zip ]]; then
+                has_options=$(unzip -p "$target_file" 2>/dev/null | grep -E "(CREATE TABLE|INSERT INTO)[[:space:]]+\`?${wp_prefix}options\`?" | head -n 1)
+                has_posts=$(unzip -p "$target_file" 2>/dev/null | grep -E "(CREATE TABLE|INSERT INTO)[[:space:]]+\`?${wp_prefix}posts\`?" | head -n 1)
+            else
+                has_options=$(grep -E "(CREATE TABLE|INSERT INTO)[[:space:]]+\`?${wp_prefix}options\`?" "$target_file" 2>/dev/null | head -n 1)
+                has_posts=$(grep -E "(CREATE TABLE|INSERT INTO)[[:space:]]+\`?${wp_prefix}posts\`?" "$target_file" 2>/dev/null | head -n 1)
+            fi
+
+            if [ -z "$has_options" ] || [ -z "$has_posts" ]; then
+                echo "FEHLER: WordPress-Tabellen '${wp_prefix}options' oder '${wp_prefix}posts' im Dump '$target_file' nicht gefunden!" | tee -a "$log_target" >&2
+                return 2
+            fi
+        fi
+    fi
+
+    # 3. Größenvergleich mit vorherigem Backup desselben Projekts
+    if [ -n "$prev_file" ] && [ -f "$prev_file" ]; then
+        local curr_size
+        local prev_size
+        curr_size=$(get_file_size_bytes "$target_file")
+        prev_size=$(get_file_size_bytes "$prev_file")
+
+        if [ "$prev_size" -gt 0 ]; then
+            local diff_bytes=$(( curr_size > prev_size ? curr_size - prev_size : prev_size - curr_size ))
+            local diff_pct=$(( diff_bytes * 100 / prev_size ))
+            if [ "$diff_pct" -gt 30 ]; then
+                echo "Warnung: Dateigröße von $(basename "$target_file") ($curr_size Bytes) weicht um $diff_pct% vom vorherigen Backup $(basename "$prev_file") ($prev_size Bytes) ab (> 30%)." | tee -a "$log_target" >&2
+                return 1
+            fi
+        fi
+    fi
+
+    return 0
+}
+
 ## Funktionen
 # backup db
 #  parameter1: db_host
@@ -1896,6 +2037,8 @@ function backup_db() {
     local db_password=$4
     local db_dateiname="$backup_destiantion$projekt_basis_dateiname"'_'"$(date +%Y-%m-%d_%H-%M-%S)"'_'"$db_name"
     local sql_file="$db_dateiname$db_dateiendung"
+
+    created_db_dump_file=""
 
     # Datenbanken sichern
     if [ "$db_name" != "" ]
@@ -1938,7 +2081,7 @@ function backup_db() {
         if [ "$dump_status" -ne 0 ] || [ ! -s "$sql_file" ]; then
             echo "FEHLER: mysqldump für '$db_name' auf '$db_host' fehlgeschlagen (Exit-Code: $dump_status)!" | tee -a "$log_file_name" >&2
             rm -f "$sql_file"
-            return 1
+            return 2
         fi
 
         echo "Datenbankdump erfolgreich erstellt: $sql_file" | tee -a "$log_file_name"
@@ -1952,10 +2095,13 @@ function backup_db() {
         echo "erledigt." | tee -a "$log_file_name"
         echo | tee -a "$log_file_name"
 
+        created_db_dump_file="$sql_file"
+
         # zip
         if ! [ -x "$(command -v zip)" ]; then
             echo 'Warnung: zip ist nicht installiert.' | tee -a "$log_file_name" >&2
             echo "SQL-Datei $sql_file bleibt unkomprimiert erhalten." | tee -a "$log_file_name"
+            return_value=1
         else
             local zip_file="$db_dateiname$db_dateiendung$dateiendung_zip"
             echo "ZIP-Datei von Sicherung erstellen $zip_file ..." | tee -a "$log_file_name"
@@ -1966,6 +2112,7 @@ function backup_db() {
                 # sql-datei löschen
                 echo "Unkomprimierte Datei löschen $sql_file ..." | tee -a "$log_file_name"
                 rm -f "$sql_file"
+                created_db_dump_file="$zip_file"
             else
                 echo "Warnung: ZIP-Erstellung fehlgeschlagen (Status: $zip_status). $sql_file bleibt erhalten." | tee -a "$log_file_name" >&2
                 return_value=1
@@ -1983,6 +2130,26 @@ function run_backup_for_project() {
     local project_env_file="$1"
     local project_name
     project_name="$(project_name_from_env_file "$project_env_file")"
+
+    local project_started_time
+    project_started_time="$(date +"%Y-%m-%d %H:%M:%S")"
+    local project_started_s
+    project_started_s="$(date +%s)"
+
+    local project_status="ok"
+    local project_exitcode=0
+    local project_warnings=()
+    local project_errors=()
+
+    local created_files_paths=()
+    local created_files_types=()
+    local created_files_dbnames=()
+    local created_files_bytes=()
+    local created_files_verified=()
+
+    local transmitted_method=""
+    local transmitted_ok="false"
+    local local_deleted="false"
 
     # Alte Werte aus einem zuvor gesicherten Projekt entfernen, damit nichts
     # (insbesondere die Ausschluss-Muster) fälschlich übernommen wird, wenn die
@@ -2047,22 +2214,15 @@ function run_backup_for_project() {
 
     source_files_dir="$SOURCE_FILES_DIR"
 
-    # Auszuschließende Muster laden.
-    # Bevorzugt wird das neue, robuste Bash-Array-Format
-    #   SOURCE_FILES_DIR_IGNORE=('*/cache/*' '*/backups/*')
-    # Aeltere Konfigurationen mit einem einfachen String werden weiterhin
-    # unterstuetzt und tolerant (inkl. versehentlicher Klammern/Anfuehrungszeichen)
-    # in ein Array umgewandelt.
+    # Auszuschließende Muster laden
     source_files_dir_ignore=()
     if declare -p SOURCE_FILES_DIR_IGNORE 2>/dev/null | grep -q '^declare -a'; then
         source_files_dir_ignore=("${SOURCE_FILES_DIR_IGNORE[@]}")
     elif [ -n "$SOURCE_FILES_DIR_IGNORE" ]; then
         local raw_ignore="$SOURCE_FILES_DIR_IGNORE"
-        # versehentlich umschliessende Klammern eines kaputten alten Werts entfernen
         raw_ignore="${raw_ignore#(}"
         raw_ignore="${raw_ignore%)}"
         read -ra source_files_dir_ignore <<< "$raw_ignore"
-        # evtl. je Muster verbliebene umschliessende Anfuehrungszeichen entfernen
         local ignore_fix_i
         for ((ignore_fix_i=0; ignore_fix_i<${#source_files_dir_ignore[@]}; ignore_fix_i++)); do
             local ignore_pattern="${source_files_dir_ignore[$ignore_fix_i]}"
@@ -2095,6 +2255,7 @@ function run_backup_for_project() {
     backup_destiantion="$basename/$projekt_basis_dateiname/"
     ensure_webroot_protection "$backup_destiantion" "deny_all"
     ensure_webroot_protection "$basename/log" "deny_all"
+    ensure_webroot_protection "$basename/status" "deny_all"
 
     # Dateien
     dateien_dateiname="$backup_destiantion$projekt_basis_dateiname"'_'"$(date +%Y-%m-%d_%H-%M-%S)"'_'files
@@ -2109,8 +2270,6 @@ function run_backup_for_project() {
     # Kontrollvariablen
     transmitted=''
 
-    ################################
-    ################################
     ################################
     # Let the show begin...
 
@@ -2128,12 +2287,73 @@ function run_backup_for_project() {
     # Pre-Backup Prüfungen & Sicherheits-Check ausführen
     run_pre_backup_checks "$project_env_file" "$log_file_name"
 
+    # WordPress-Tabellenpräfix ermitteln (falls WordPress-Ordner vorhanden)
+    local wp_table_prefix=""
+    if [ -n "$source_files_dir" ] && [ -d "$source_files_dir" ]; then
+        local found_wp_config=""
+        found_wp_config="$(find_wp_config_in_path "$source_files_dir")"
+        if [ -n "$found_wp_config" ] && [ -f "$found_wp_config" ]; then
+            parse_wp_config_file "$found_wp_config"
+            wp_table_prefix="${WP_PARSED_TABLE_PREFIX:-wp_}"
+        fi
+    fi
+
     # Datenbanken sichern (beliebig viele), nur wenn Umfang alles oder db
     if [ "$run_scope" == "alles" ] || [ "$run_scope" == "db" ]; then
-        for ((db_backup_i=0; db_backup_i<${#db_names[@]}; db_backup_i++))
-        do
-            backup_db "${db_hosts[$db_backup_i]}" "${db_names[$db_backup_i]}" "${db_users[$db_backup_i]}" "${db_passwords[$db_backup_i]}"
-        done
+        if [ "${#db_names[@]}" -gt 0 ]; then
+            for ((db_backup_i=0; db_backup_i<${#db_names[@]}; db_backup_i++))
+            do
+                local current_db_name="${db_names[$db_backup_i]}"
+                backup_db "${db_hosts[$db_backup_i]}" "$current_db_name" "${db_users[$db_backup_i]}" "${db_passwords[$db_backup_i]}"
+                local db_backup_status=$?
+
+                if [ "$db_backup_status" -eq 2 ] || [ -z "$created_db_dump_file" ] || [ ! -f "$created_db_dump_file" ]; then
+                    echo "FEHLER: Datenbank '$current_db_name' konnte nicht gesichert werden!" | tee -a "$log_file_name" >&2
+                    project_errors+=("Datenbankdump für '$current_db_name' fehlgeschlagen")
+                    project_status="fehler"
+                    project_exitcode=2
+                else
+                    if [ "$db_backup_status" -eq 1 ]; then
+                        project_warnings+=("Datenbankdump für '$current_db_name' unkomprimiert (zip fehlgeschlagen oder nicht installiert)")
+                        [ "$project_exitcode" -lt 1 ] && project_exitcode=1
+                        [ "$project_status" == "ok" ] && project_status="warnung"
+                    fi
+
+                    # Vorheriges Backup für Größenvergleich ermitteln
+                    local prev_db_file=""
+                    prev_db_file=$(ls -t "$backup_destiantion"${projekt_basis_dateiname}_*_"${current_db_name}".sql.zip 2>/dev/null | grep -v "$created_db_dump_file" | head -n 1)
+                    [ -z "$prev_db_file" ] && prev_db_file=$(ls -t "$backup_destiantion"${projekt_basis_dateiname}_*_"${current_db_name}".sql 2>/dev/null | grep -v "$created_db_dump_file" | head -n 1)
+
+                    # Selbstprüfung des DB-Backups durchführen
+                    verify_backup "$created_db_dump_file" "db" "$current_db_name" "$wp_table_prefix" "$prev_db_file" "$log_file_name"
+                    local v_db_status=$?
+                    local file_bytes
+                    file_bytes="$(get_file_size_bytes "$created_db_dump_file")"
+
+                    created_files_paths+=("$created_db_dump_file")
+                    created_files_types+=("db")
+                    created_files_dbnames+=("$current_db_name")
+                    created_files_bytes+=("$file_bytes")
+
+                    if [ "$v_db_status" -eq 0 ]; then
+                        created_files_verified+=("true")
+                        echo "Selbstprüfung für '$created_db_dump_file': ERFOLGREICH" | tee -a "$log_file_name"
+                    elif [ "$v_db_status" -eq 1 ]; then
+                        created_files_verified+=("true")
+                        echo "Selbstprüfung für '$created_db_dump_file': MIT WARNUNG BESTANDEN" | tee -a "$log_file_name"
+                        project_warnings+=("Größenabweichung zu vorherigem Backup bei '$current_db_name' > 30%")
+                        [ "$project_exitcode" -lt 1 ] && project_exitcode=1
+                        [ "$project_status" == "ok" ] && project_status="warnung"
+                    else
+                        created_files_verified+=("false")
+                        echo "Selbstprüfung für '$created_db_dump_file': FEHLGESCHLAGEN" | tee -a "$log_file_name" >&2
+                        project_errors+=("Selbstprüfung für Datenbankdump '$current_db_name' fehlgeschlagen")
+                        project_status="fehler"
+                        project_exitcode=2
+                    fi
+                fi
+            done
+        fi
     else
         echo "Umfang '$run_scope' - Datenbank-Sicherung wird übersprungen." | tee -a "$log_file_name"
         echo | tee -a "$log_file_name"
@@ -2145,9 +2365,15 @@ function run_backup_for_project() {
         then
             if [ ! -d "$source_files_dir" ]; then
                 echo "Warnung: Website-Verzeichnis '$source_files_dir' existiert nicht oder ist kein Verzeichnis." | tee -a "$log_file_name" >&2
+                project_errors+=("Website-Verzeichnis '$source_files_dir' existiert nicht")
+                project_status="fehler"
+                project_exitcode=2
             elif ! [ -x "$(command -v zip)" ]; then
                 echo 'Fehler: zip ist nicht installiert.' | tee -a "$log_file_name" >&2
                 echo 'Website-Dateien konnten nicht gesichert werden.' | tee -a "$log_file_name"
+                project_errors+=("zip ist nicht installiert, Datei-Sicherung nicht möglich")
+                project_status="fehler"
+                project_exitcode=2
             else
                 local zip_target="$dateien_dateiname$dateiendung_zip"
                 echo "ZIP-Datei von Dateien im Website-Verzeichnis ($source_files_dir) erstellen: $zip_target ..." | tee -a "$log_file_name"
@@ -2161,10 +2387,46 @@ function run_backup_for_project() {
                     zip -rq -y "$zip_target" "$source_files_dir" 2>> "$log_file_name"
                     zip_files_status=$?
                 fi
+
                 if [ "$zip_files_status" -eq 0 ] || [ "$zip_files_status" -eq 12 ]; then
                     echo "erledigt: $zip_target" | tee -a "$log_file_name"
+
+                    # Vorheriges Backup für Größenvergleich ermitteln
+                    local prev_files_file=""
+                    prev_files_file=$(ls -t "$backup_destiantion"${projekt_basis_dateiname}_*_files.zip 2>/dev/null | grep -v "$zip_target" | head -n 1)
+
+                    # Selbstprüfung des Datei-ZIPs durchführen
+                    verify_backup "$zip_target" "files" "" "" "$prev_files_file" "$log_file_name"
+                    local v_files_status=$?
+                    local files_bytes
+                    files_bytes="$(get_file_size_bytes "$zip_target")"
+
+                    created_files_paths+=("$zip_target")
+                    created_files_types+=("files")
+                    created_files_dbnames+=("")
+                    created_files_bytes+=("$files_bytes")
+
+                    if [ "$v_files_status" -eq 0 ]; then
+                        created_files_verified+=("true")
+                        echo "Selbstprüfung für '$zip_target': ERFOLGREICH" | tee -a "$log_file_name"
+                    elif [ "$v_files_status" -eq 1 ]; then
+                        created_files_verified+=("true")
+                        echo "Selbstprüfung für '$zip_target': MIT WARNUNG BESTANDEN" | tee -a "$log_file_name"
+                        project_warnings+=("Größenabweichung zu vorherigem Datei-Backup > 30%")
+                        [ "$project_exitcode" -lt 1 ] && project_exitcode=1
+                        [ "$project_status" == "ok" ] && project_status="warnung"
+                    else
+                        created_files_verified+=("false")
+                        echo "Selbstprüfung für '$zip_target': FEHLGESCHLAGEN" | tee -a "$log_file_name" >&2
+                        project_errors+=("Selbstprüfung für Datei-ZIP fehlgeschlagen")
+                        project_status="fehler"
+                        project_exitcode=2
+                    fi
                 else
                     echo "Warnung: zip beendete mit Exit-Code $zip_files_status" | tee -a "$log_file_name" >&2
+                    project_errors+=("ZIP-Erstellung für Website-Dateien fehlgeschlagen (Exit-Code: $zip_files_status)")
+                    project_status="fehler"
+                    project_exitcode=2
                 fi
                 echo | tee -a "$log_file_name"
             fi
@@ -2177,6 +2439,7 @@ function run_backup_for_project() {
     # Dateien per rsync synchronisieren (rsync)
     if [ "$rysnc_host" != "" ]
     then
+        transmitted_method="rsync"
         echo "Dateien zu entferntem Server synchronisieren (rsync)..." | tee -a "$log_file_name"
         echo " lokaler Ordner: $backup_destiantion" | tee -a "$log_file_name"
         echo " entfernter Ordner: $rsync_directory" | tee -a "$log_file_name"
@@ -2192,10 +2455,15 @@ function run_backup_for_project() {
         if [ "$rsync_status" -eq 0 ]
         then
           transmitted='true'
+          transmitted_ok='true'
           echo "rsync-Synchronisation erfolgreich abgeschlossen." | tee -a "$log_file_name"
         else
           transmitted=''
+          transmitted_ok='false'
           echo "Fehler bei der rsync-Synchronisation (Status: $rsync_status)" | tee -a "$log_file_name" >&2
+          project_warnings+=("rsync-Übertragung fehlgeschlagen (Status: $rsync_status)")
+          [ "$project_exitcode" -lt 1 ] && project_exitcode=1
+          [ "$project_status" == "ok" ] && project_status="warnung"
         fi
     fi
     echo | tee -a "$log_file_name"
@@ -2203,6 +2471,7 @@ function run_backup_for_project() {
     # Dateien per sftp kopieren sftp
     if [ "$sftp_host" != "" ]
     then
+        transmitted_method="sftp"
         echo "Dateien auf entfernten Server kopieren (sftp)..." | tee -a "$log_file_name"
         # batchfile für sftp erstellen
         local sftp_batchfile="$basename/.${projekt_basis_dateiname}_sftp_upload_batchfile_$$"
@@ -2234,13 +2503,18 @@ function run_backup_for_project() {
         if [ "$sftp_status" -eq 0 ]
         then
           transmitted='true'
+          transmitted_ok='true'
           echo "sftp-Übertragung erfolgreich abgeschlossen." | tee -a "$log_file_name"
         else
           transmitted=''
+          transmitted_ok='false'
           echo "Fehler bei der sftp-Übertragung (Status: $sftp_status)" | tee -a "$log_file_name" >&2
+          project_warnings+=("sftp-Übertragung fehlgeschlagen (Status: $sftp_status)")
+          [ "$project_exitcode" -lt 1 ] && project_exitcode=1
+          [ "$project_status" == "ok" ] && project_status="warnung"
         fi
 
-        # Dokumenation in logfile
+        # Dokumentation in logfile
         echo "sftp batchfile content:" >> "$log_file_name"
         echo "-----" >> "$log_file_name"
         cat "$sftp_batchfile" >> "$log_file_name" 2>/dev/null || true
@@ -2251,12 +2525,13 @@ function run_backup_for_project() {
         echo | tee -a "$log_file_name"
     fi
 
-    # Dateien löschen, wenn erfolgreich übermittelt wurde
-    if [ "$delete_if_transmitted" == "true" ] && [ "$transmitted" == "true" ]
+    # Dateien löschen, wenn erfolgreich übermittelt wurde (Prüfung lief vorher)
+    if [ "$delete_if_transmitted" == "true" ] && [ "$transmitted" == "true" ] && [ "$transmitted_ok" == "true" ] && [ "$project_exitcode" -lt 2 ]
     then
         echo "Dateien in $backup_destiantion werden nach erfolgreicher Übertragung gelöscht ..." | tee -a "$log_file_name"
         if [ -n "$backup_destiantion" ] && [ -d "$backup_destiantion" ]; then
             find "$backup_destiantion" -maxdepth 1 -type f ! -name '.htaccess' -delete -print | tee -a "$log_file_name"
+            local_deleted="true"
         fi
         echo "erledigt." | tee -a "$log_file_name"
         echo | tee -a "$log_file_name"
@@ -2277,13 +2552,94 @@ function run_backup_for_project() {
         find "$basename/log" -maxdepth 1 -type f -name '*.log' -mtime +"$backup_live_time" -delete 2>/dev/null || true
     fi
 
+    local project_ended_time
+    project_ended_time="$(date +"%Y-%m-%d %H:%M:%S")"
+    local project_ended_s
+    project_ended_s="$(date +%s)"
+    local project_duration_s=$((project_ended_s - project_started_s))
+
+    # Maschinenlesbaren Status schreiben (<scriptordner>/status/<PROJEKT_BASIS_DATEINAME>.last.json)
+    local status_dir="$basename/status"
+    ensure_webroot_protection "$status_dir" "deny_all"
+    local status_file="$status_dir/${projekt_basis_dateiname}.last.json"
+
+    local dateien_json="["
+    local df_first=1
+    local df_i
+    for ((df_i=0; df_i<${#created_files_paths[@]}; df_i++)); do
+        if [ "$df_first" -eq 1 ]; then
+            df_first=0
+        else
+            dateien_json+=", "
+        fi
+        local f_path="${created_files_paths[$df_i]}"
+        local f_typ="${created_files_types[$df_i]}"
+        local f_dbname="${created_files_dbnames[$df_i]}"
+        local f_bytes="${created_files_bytes[$df_i]}"
+        local f_geprueft="${created_files_verified[$df_i]}"
+
+        local db_name_val="null"
+        [ -n "$f_dbname" ] && db_name_val="\"$(json_escape "$f_dbname")\""
+
+        dateien_json+="{\"pfad\": \"$(json_escape "$f_path")\", \"typ\": \"$f_typ\", \"db_name\": $db_name_val, \"bytes\": $f_bytes, \"geprueft\": $f_geprueft}"
+    done
+    dateien_json+="]"
+
+    local warnungen_json
+    warnungen_json="$(json_string_array "${project_warnings[@]}")"
+    local fehler_json
+    fehler_json="$(json_string_array "${project_errors[@]}")"
+
+    local uebertragen_methode_val="null"
+    [ -n "$transmitted_method" ] && uebertragen_methode_val="\"$transmitted_method\""
+    local uebertragen_ok_val="false"
+    [ "$transmitted_ok" == "true" ] && uebertragen_ok_val="true"
+
+    local lokal_geloescht_val="false"
+    [ "$local_deleted" == "true" ] && lokal_geloescht_val="true"
+
+    local current_project_json
+    current_project_json=$(cat <<EOF
+{
+  "projekt": "$(json_escape "$project_name")",
+  "gestartet": "$project_started_time",
+  "beendet": "$project_ended_time",
+  "dauer_s": $project_duration_s,
+  "scope": "$run_scope",
+  "status": "$project_status",
+  "exitcode": $project_exitcode,
+  "dateien": $dateien_json,
+  "uebertragen": {
+    "methode": $uebertragen_methode_val,
+    "ok": $uebertragen_ok_val
+  },
+  "lokal_geloescht": $lokal_geloescht_val,
+  "warnungen": $warnungen_json,
+  "fehler": $fehler_json,
+  "logdatei": "$(json_escape "$log_file_name")"
+}
+EOF
+)
+    echo "$current_project_json" > "$status_file"
+    chmod 600 "$status_file" 2>/dev/null || true
+
+    all_project_json_results+=("$current_project_json")
+
+    if [ "$project_exitcode" -gt "$overall_exitcode" ]; then
+        overall_exitcode="$project_exitcode"
+    fi
+
     echo | tee -a "$log_file_name"
+    return "$project_exitcode"
 }
 
 ################################
 ################################
 ################################
 ## Ausgewählte Projekte nacheinander sichern
+
+overall_exitcode=0
+all_project_json_results=()
 
 for selected_env_file in "${selected_env_files[@]}"; do
     run_backup_for_project "$selected_env_file"
@@ -2293,3 +2649,25 @@ done
 after=$(date +%s)
 echo "Dauer des gesamten Backup-Vorgangs: " $((after - before)) " Sekunden"
 echo
+
+# Falls --json angegeben wurde, geben wir das finale JSON auf stdout aus
+if [ "$cli_json" == "true" ]; then
+    if [ "${#all_project_json_results[@]}" -eq 1 ] && [ "$cli_project" != "alle" ]; then
+        echo "${all_project_json_results[0]}" >&3
+    else
+        out_json="[\n"
+        out_first=1
+        for res_item in "${all_project_json_results[@]}"; do
+            if [ "$out_first" -eq 1 ]; then
+                out_first=0
+            else
+                out_json+=",\n"
+            fi
+            out_json+="  $res_item"
+        done
+        out_json+="\n]"
+        printf '%b\n' "$out_json" >&3
+    fi
+fi
+
+exit "$overall_exitcode"

@@ -3,12 +3,6 @@ basename=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 set -o pipefail
 umask 077
 
-# Gemeinsame Bibliothek einbinden (falls vorhanden)
-if [ -f "$basename/lib_common.sh" ]; then
-    # shellcheck source=/dev/null
-    source "$basename/lib_common.sh"
-fi
-
 # Farbdefinitionen für interaktive Terminalausgabe (wird für Log-Dateien automatisch bereinigt)
 if [ -t 1 ] && [ -z "${CLR_RESET+x}" ]; then
     CLR_RESET=$'\033[0m'
@@ -176,6 +170,58 @@ if [ "$cli_quiet" == "true" ] && [ "$cli_json" != "true" ]; then
     exec 4>&1
     exec 1>/dev/null
 fi
+
+# Escaped einen String sicher für JSON ohne externe Abhängigkeiten wie jq
+function json_escape() {
+    local input="$1"
+    local output=""
+    # Backslash, Anführungszeichen und Steuerzeichen maskieren
+    output="${input//\\/\\\\}"
+    output="${output//\"/\\\"}"
+    output="${output//$'\n'/\\n}"
+    output="${output//$'\r'/\\r}"
+    output="${output//$'\t'/\\t}"
+    output="${output//$'\b'/\\b}"
+    output="${output//$'\f'/\\f}"
+    printf '%s' "$output"
+}
+
+# Erzeugt ein JSON-String-Array aus den übergebenen Argumenten
+function json_string_array() {
+    local items=("$@")
+    local out="["
+    local first=1
+    for item in "${items[@]}"; do
+        [ -z "$item" ] && continue
+        if [ "$first" -eq 1 ]; then
+            first=0
+        else
+            out+=", "
+        fi
+        out+="\"$(json_escape "$item")\""
+    done
+    out+="]"
+    printf '%s' "$out"
+}
+
+# Ermittelt die Dateigröße in Bytes portabel (stat / wc)
+function get_file_size_bytes() {
+    local file="$1"
+    if [ ! -f "$file" ]; then
+        echo 0
+        return 0
+    fi
+    local size=0
+    # GNU stat (-c %s), BSD/macOS stat (-f %z) oder wc -c als Fallback
+    if size=$(stat -c%s "$file" 2>/dev/null); then
+        echo "$size"
+    elif size=$(stat -f%z "$file" 2>/dev/null); then
+        echo "$size"
+    else
+        size=$(wc -c < "$file" 2>/dev/null || echo 0)
+        echo "${size// /}"
+    fi
+}
 
 # normalisiert Eingaben für den Umfang auf 'alles' / 'db' / 'dateien'
 function normalize_scope() {
@@ -1496,10 +1542,36 @@ function run_pre_backup_checks() {
         # 1. PHP-Dateien im Upload-Ordner
         local uploads_dir="$wp_root_dir/wp-content/uploads"
         if [ -d "$uploads_dir" ]; then
-            local susp_php_files=()
+            local raw_susp_php_files=()
             while IFS= read -r f; do
-                [ -n "$f" ] && susp_php_files+=("$f")
-            done < <(find "$uploads_dir" -maxdepth 5 -type f \( -name "*.php" -o -name "*.phtml" -o -name "*.php5" -o -name "*.php7" -o -name "*.phps" -o -name "*.suspected" \) 2>/dev/null | head -n 10)
+                [ -n "$f" ] && raw_susp_php_files+=("$f")
+            done < <(find "$uploads_dir" -maxdepth 5 -type f \( -name "*.php" -o -name "*.phtml" -o -name "*.php5" -o -name "*.php7" -o -name "*.phps" -o -name "*.suspected" \) 2>/dev/null | head -n 30)
+
+            local susp_php_files=()
+            local ignored_placeholder_count=0
+            for f in "${raw_susp_php_files[@]}"; do
+                local f_name
+                f_name="$(basename "$f")"
+                local f_name_lower
+                f_name_lower="$(echo "$f_name" | tr '[:upper:]' '[:lower:]')"
+                local f_size
+                f_size=$(get_file_size_bytes "$f")
+
+                # Wenn es sich um eine Standard WordPress Platzhalter index.php handelt (<= 350 Bytes)
+                # und kein verdächtiger ausführbarer Code / Webshell-Muster darin enthalten ist
+                if [ "$f_name_lower" == "index.php" ] && [ "$f_size" -le 350 ]; then
+                    if grep -Eq 'Silence is golden' "$f" 2>/dev/null; then
+                        ignored_placeholder_count=$((ignored_placeholder_count + 1))
+                        continue
+                    fi
+                    # Falls kein 'Silence is golden', aber nur harmloser Header/Kommentar ohne bösartige Aufrufe
+                    if ! grep -Eiq '(eval|assert|base64_decode|gzinflate|system|exec|shell_exec|passthru|\$_POST|\$_GET|\$_REQUEST|\$_COOKIE|file_get_contents|curl_exec|include|require)' "$f" 2>/dev/null; then
+                        ignored_placeholder_count=$((ignored_placeholder_count + 1))
+                        continue
+                    fi
+                fi
+                susp_php_files+=("$f")
+            done
 
             if [ "${#susp_php_files[@]}" -gt 0 ]; then
                 local num_susp=${#susp_php_files[@]}
@@ -1514,7 +1586,11 @@ function run_pre_backup_checks() {
                 log_check_item "ALERT" "Verdächtige PHP-Dateien in '$uploads_dir' gefunden (${num_susp} Datei(en): ${sample_names})!" "$log_target" "Uploads sollten keine PHP-Dateien enthalten (Malware / Webshell-Gefahr!)."
                 check_alert_count=$((check_alert_count + 1))
             else
-                log_check_item "OK" "Upload-Ordner ('$uploads_dir') ist frei von verdächtigen PHP-Skripten" "$log_target"
+                if [ "$ignored_placeholder_count" -gt 0 ]; then
+                    log_check_item "OK" "Upload-Ordner ('$uploads_dir') ist frei von verdächtigen PHP-Skripten ($ignored_placeholder_count Standard-Platzhalter index.php ignoriert)" "$log_target"
+                else
+                    log_check_item "OK" "Upload-Ordner ('$uploads_dir') ist frei von verdächtigen PHP-Skripten" "$log_target"
+                fi
                 check_ok_count=$((check_ok_count + 1))
             fi
         fi

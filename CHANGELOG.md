@@ -31,8 +31,11 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
   - `1` = Warnungen (z.B. Remote-Transfer fehlgeschlagen, Backups lokal intakt; Größenabweichung > 30 %).
   - `2` = Fehler (Dump oder Datei-ZIP fehlt/defekt; mysqldump/zip fehlgeschlagen).
   - Bei `--project=alle` gilt der schlechteste Status aller Projekte.
-- **Gemeinsame Bibliothek (`lib_common.sh`):**
-  - Wiederverwendbare Funktionen für JSON-Escaping, wp-config-Parsing, Webroot-Schutz, Pfadauflösung und Farbformatierung.
+- **Autarke Skripte (100% self-contained):**
+  - Beide Skripte (`backup_full_db_files_zip.sh` und `update_wp.sh`) sind vollständig eigenständig und unabhängig voneinander ohne externe Bibliotheksdatei (`lib_common.sh`) lauffähig.
+  - Das Update-Skript interagiert direkt mit dem Backup-Skript (erstellt vor Updates ein Backup und führt das Update nur bei erfolgreichem Backup aus).
+- **Verfeinerte Malware-Erkennung im Upload-Ordner:**
+  - Standardmäßige, harmlose WordPress-Platzhalter (`index.php` mit "Silence is golden" bzw. ohne ausführbaren Schadcode und <= 350 Bytes) im Upload-Verzeichnis lösen keinen Fehlalarm mehr aus.
 - **Neuer Parameter `--quiet` / `-q`:**
   - Unterdrückt normale Informationsausgaben und gibt nur Fehler und die Zusammenfassung aus.
 

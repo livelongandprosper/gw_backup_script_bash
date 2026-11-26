@@ -43,7 +43,7 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
   - Setup- und Doku-Hinweise für Hetzner Storage Boxen ergänzt (Port `23` für `rsync`/SSH, relative Zielpfade ohne führendes `/`, OpenSSH-Key-Format).
 - **Integrierter SSH-Key-Assistent (`backup_full_db_files_zip.sh`):**
   - Im Setup-Assistenten (`run_setup_assistant()`), im WordPress-Auto-Import (`scan_and_setup_wordpress_sites()`) sowie über Hauptmenüpunkt `10` (`SSH-Key generieren / Public Key anzeigen`) kann direkt ein passwortloser OpenSSH-Key (`ed25519`, Fallback `rsa-4096`) im geschützten Unterordner `.ssh/id_ed25519_backup` des Backup-Skript-Verzeichnisses (`chmod 700`/`600` + `.htaccess`-Sperre) erzeugt werden.
-  - Nach der Erstellung (oder auf Wunsch bei vorhandenem Key) wird der öffentliche Schlüssel (`.pub`) samt Hinterlegungshinweis und optionalem `ssh-copy-id`-Befehl direkt im Terminal angezeigt.
+  - Nach der Erstellung (oder auf Wunsch bei vorhandenem Key) wird der öffentliche Schlüssel (`.pub`) direkt im Terminal samt fertigen Copy-Paste-Befehlen (Eintrag in `~/.ssh/authorized_keys` mit eingebettetem Public Key, Hetzner Storage Box `install-ssh-key` über Port `23` sowie `ssh-copy-id`) angezeigt.
   - `.htaccess`-Schutzregel im Skript-Wurzelverzeichnis um `*.key`, `*.pub` und `id_*` erweitert.
 
 ### Entfernt

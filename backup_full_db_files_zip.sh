@@ -1061,7 +1061,7 @@ EOF
     fi
 }
 
-# Zeigt den öffentlichen SSH-Key (.pub) samt Hinterlegungshinweis für Zielprovider an
+# Zeigt den öffentlichen SSH-Key (.pub) samt Copy-Paste-Befehlen für Zielprovider an
 function show_ssh_public_key() {
     local key_path="$1"
     local remote_host="${2:-}"
@@ -1074,21 +1074,36 @@ function show_ssh_public_key() {
         return 1
     fi
 
+    local pub_key_content
+    pub_key_content="$(tr -d '\r\n' < "$pub_path")"
+    local escaped_pub_key="${pub_key_content//\'/\'\\\'\'}"
+    local target_conn="<user>@<host>"
+    local hetzner_target="<user>@<user>.your-storagebox.de"
+    local effective_port="${remote_port:-22}"
+
+    if [ -n "$remote_host" ] && [ -n "$remote_user" ]; then
+        target_conn="$remote_user@$remote_host"
+        hetzner_target="$remote_user@$remote_host"
+    fi
+
     echo
     echo "=================================================="
     echo "Öffentlicher SSH-Key (Public Key) für Zielprovider"
     echo "=================================================="
-    cat "$pub_path"
+    echo "$pub_key_content"
     echo "=================================================="
     echo "Privater Key: $key_path"
     echo "Öffentl. Key: $pub_path"
     echo
-    echo "Hinweis: Diesen öffentlichen Schlüssel beim Zielprovider hinterlegen"
-    echo "(z. B. Hetzner Storage Box -> SSH-Keys bzw. .ssh/authorized_keys)."
-    if [ -n "$remote_host" ] && [ -n "$remote_user" ]; then
-        echo "Alternativ per ssh-copy-id übertragen:"
-        echo "  ssh-copy-id -p ${remote_port:-22} -i \"$pub_path\" \"$remote_user@$remote_host\""
-    fi
+    echo "Copy-Paste-Befehle zum Hinterlegen des Schlüssels:"
+    echo "  1) Direkt auf dem Zielserver (in ~/.ssh/authorized_keys eintragen):"
+    echo "     mkdir -p ~/.ssh && chmod 700 ~/.ssh && printf '%s\\n' '$escaped_pub_key' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+    echo
+    echo "  2) Hetzner Storage Box (von diesem Server aus über Port 23, OpenSSH + RFC4716):"
+    echo "     printf '%s\\n' '$escaped_pub_key' | ssh -p 23 \"$hetzner_target\" install-ssh-key"
+    echo
+    echo "  3) Standard-SSH-Server (von diesem Server aus per ssh-copy-id):"
+    echo "     ssh-copy-id -p $effective_port -i \"$pub_path\" \"$target_conn\""
     echo
     return 0
 }

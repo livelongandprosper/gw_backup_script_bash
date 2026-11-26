@@ -44,6 +44,10 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
 - Korrigierte Argumentverschiebung beim WordPress-Scan, die Backup-Konfigurationswerte und Datenbankzugänge in falsche Variablen schrieb; ungültige oder verschobene Werte werden nun erkannt.
 - Backup- und Update-Konfigurationen escapen Shell-Sonderzeichen sicher; Projektwerte werden vor dem Laden zurückgesetzt und bestehende Scan-Konfigurationen nur nach Rückfrage überschrieben.
 - Fehlerbehandlung für Projektauswahl, JSON-Ausgabe, Retention-Eingaben, Plugin-Ausschlüsse, Update-Rückgabecodes und fehlende Backup-Konfiguration verbessert.
+- **HTML-Sicherung & normalisierter Vorher-/Nachher-Vergleich in `update_wp.sh`:**
+  - Speichert bei jedem Lauf die ausgelieferten HTML-Antworten aller `CHECK_PATHS` unter `update-runs/<projekt>/<datum>/html/vorher_<slug>.html` und `nachher_<slug>.html` (inkl. `.htaccess`-Schutz).
+  - `compare_html_files()` filtert Kommentare, `<script>`-, `<style>`- sowie `<noscript>`-Blöcke heraus und vergleicht normalisierten sichtbaren Text, `<title>` und `<h1>`: ROT bei > 50 % Textverlust oder fehlendem `<title>`/`<h1>`, GELB bei inhaltlichen Abweichungen (inkl. Unified-Diff `html/diff_<slug>.diff`), GRÜN bei unverändertem Inhalt.
+  - Ergebnisse werden zusätzlich im JSON-Output unter `html_vergleiche` erfasst.
 - **Setup-Assistent in `update_wp.sh` korrigiert & erweitert:**
   - Automatischen Vorschlag für `SKIP_PLUGINS` entfernt (`--skip-plugins` + `grep -E '(none|custom|disabled)'` schlug fälschlich alle aktuellen WordPress.org-Plugins zum Ausschluss vor); `SKIP_PLUGINS` bleibt bei der Einrichtung nun standardmäßig leer.
   - Automatische Ermittlung von `MUST_CONTAIN` aus dem tatsächlichen HTML der Startseite (`detect_must_contain_from_url()` / `detect_must_contain_from_html()`), sodass nur real im Quelltext enthaltene Texte vorgeschlagen werden.

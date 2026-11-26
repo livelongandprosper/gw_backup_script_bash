@@ -1388,6 +1388,149 @@ function detect_check_paths_from_sitemap() {
     return 1
 }
 
+# Erzeugt aus einem relativen URL-Pfad einen sicheren Dateinamen-Slug
+function path_to_slug() {
+    local raw_path="$1"
+    local clean_p="${raw_path#/}"
+    clean_p="${clean_p%/}"
+    if [ -z "$clean_p" ]; then
+        echo "home"
+    else
+        echo "$clean_p" | sed -e 's/[^a-zA-Z0-9_-]/_/g'
+    fi
+}
+
+# Vergleicht zwei HTML-Dateien (vorher/nachher) normalisiert anhand des sichtbaren Inhalts,
+# <title> und <h1>, und schreibt bei Abweichungen ein Diff.
+# Ausgabe auf stdout: "STATUS|REASON|LEN_BEFORE|LEN_AFTER" (STATUS: gruen | gelb | rot)
+function compare_html_files() {
+    local before_file="$1"
+    local after_file="$2"
+    local diff_file="$3"
+
+    if [ ! -f "$before_file" ] || [ ! -f "$after_file" ]; then
+        echo "gelb|HTML-Vergleichsdatei fehlt|0|0"
+        return 0
+    fi
+
+    if command -v php >/dev/null 2>&1; then
+        local php_cmp='
+            $beforeFile = $argv[1];
+            $afterFile  = $argv[2];
+            $diffFile   = $argv[3];
+
+            $rawBefore = @file_get_contents($beforeFile);
+            $rawAfter  = @file_get_contents($afterFile);
+            if ($rawBefore === false || $rawAfter === false) {
+                echo "gelb|HTML-Dateien konnten nicht gelesen werden|0|0";
+                exit(0);
+            }
+
+            $analyze = function($html) {
+                $title = "";
+                if (preg_match("/<title\b[^>]*>(.*?)<\/title>/is", $html, $tm)) {
+                    $title = trim(preg_replace("/\s+/u", " ", html_entity_decode(strip_tags($tm[1]), ENT_QUOTES | ENT_HTML5, "UTF-8")));
+                }
+
+                $h1List = [];
+                if (preg_match_all("/<h1\b[^>]*>(.*?)<\/h1>/is", $html, $hm)) {
+                    foreach ($hm[1] as $rawH1) {
+                        $cleanH1 = trim(preg_replace("/\s+/u", " ", html_entity_decode(strip_tags($rawH1), ENT_QUOTES | ENT_HTML5, "UTF-8")));
+                        if ($cleanH1 !== "") {
+                            $h1List[] = $cleanH1;
+                        }
+                    }
+                }
+
+                $clean = preg_replace("/<!--.*?-->/s", "", $html);
+                $clean = preg_replace("/<script\b[^>]*>.*?<\/script>/is", "", $clean);
+                $clean = preg_replace("/<style\b[^>]*>.*?<\/style>/is", "", $clean);
+                $clean = preg_replace("/<noscript\b[^>]*>.*?<\/noscript>/is", "", $clean);
+                $clean = preg_replace("/<\/?(p|div|section|article|header|footer|main|aside|nav|li|ul|ol|h[1-6]|tr|td|th|blockquote|pre|br|hr)\b[^>]*>/i", "\n", $clean);
+                $text = html_entity_decode(strip_tags($clean), ENT_QUOTES | ENT_HTML5, "UTF-8");
+
+                $lines = preg_split("/\r\n|\r|\n/", $text);
+                $normLines = [];
+                foreach ($lines as $line) {
+                    $line = trim(preg_replace("/\s+/u", " ", $line));
+                    if ($line !== "") {
+                        $normLines[] = $line;
+                    }
+                }
+                $normText = implode("\n", $normLines);
+                $len = function_exists("mb_strlen") ? mb_strlen($normText, "UTF-8") : strlen($normText);
+
+                return [
+                    "title"   => $title,
+                    "h1"      => $h1List,
+                    "text"    => $normText,
+                    "len"     => $len
+                ];
+            };
+
+            $b = $analyze($rawBefore);
+            $a = $analyze($rawAfter);
+
+            $status = "gruen";
+            $reason = "Sichtbarer Seiteninhalt unverändert (" . $a["len"] . " Zeichen)";
+
+            if ($b["len"] >= 100 && $a["len"] < ($b["len"] * 0.5)) {
+                $status = "rot";
+                $reason = "Sichtbarer Text um mehr als 50% geschrumpft (" . $b["len"] . " -> " . $a["len"] . " Zeichen)";
+            } elseif ($b["title"] !== "" && $a["title"] === "") {
+                $status = "rot";
+                $reason = "<title>-Tag nach Update leer/verschwunden";
+            } elseif (count($b["h1"]) > 0 && count($a["h1"]) === 0) {
+                $status = "rot";
+                $reason = "<h1>-Überschrift nach Update verschwunden";
+            } elseif ($b["text"] !== $a["text"]) {
+                $status = "gelb";
+                $reason = "Sichtbarer Seiteninhalt weicht ab (" . $b["len"] . " -> " . $a["len"] . " Zeichen)";
+            }
+
+            if ($status !== "gruen" && $diffFile !== "") {
+                $tmpB = tempnam(sys_get_temp_dir(), "wph_b_");
+                $tmpA = tempnam(sys_get_temp_dir(), "wph_a_");
+                if ($tmpB !== false && $tmpA !== false) {
+                    file_put_contents($tmpB, $b["text"] . "\n");
+                    file_put_contents($tmpA, $a["text"] . "\n");
+                    $cmd = "diff -u --label " . escapeshellarg("vorher (normalisierter Text)") . " --label " . escapeshellarg("nachher (normalisierter Text)") . " " . escapeshellarg($tmpB) . " " . escapeshellarg($tmpA) . " 2>/dev/null";
+                    $diffOut = shell_exec($cmd);
+                    if ($diffOut !== null && $diffOut !== "") {
+                        @file_put_contents($diffFile, $diffOut);
+                    } else {
+                        @file_put_contents($diffFile, "Status: $status\nGrund: $reason\nVorher-Zeichen: {$b["len"]}\nNachher-Zeichen: {$a["len"]}\n");
+                    }
+                    @unlink($tmpB);
+                    @unlink($tmpA);
+                }
+            } elseif ($diffFile !== "" && file_exists($diffFile)) {
+                @unlink($diffFile);
+            }
+
+            $reason = str_replace(["|", "\r", "\n"], ["/", " ", " "], $reason);
+            echo $status . "|" . $reason . "|" . $b["len"] . "|" . $a["len"];
+        '
+        local res
+        res=$(php -r "$php_cmp" "$before_file" "$after_file" "$diff_file" 2>/dev/null || true)
+        if [ -n "$res" ]; then
+            echo "$res"
+            return 0
+        fi
+    fi
+
+    # Fallback ohne PHP
+    local len_b len_a
+    len_b=$(wc -c < "$before_file" 2>/dev/null | tr -d ' ' || echo 0)
+    len_a=$(wc -c < "$after_file" 2>/dev/null | tr -d ' ' || echo 0)
+    if cmp -s "$before_file" "$after_file" 2>/dev/null; then
+        echo "gruen|HTML unverändert (${len_a} Bytes)|${len_b}|${len_a}"
+    else
+        diff -u "$before_file" "$after_file" > "$diff_file" 2>/dev/null || true
+        echo "gelb|HTML weicht ab (${len_b} -> ${len_a} Bytes)|${len_b}|${len_a}"
+    fi
+}
+
 ################################
 ################################
 ################################
@@ -1775,6 +1918,7 @@ function run_update_for_project() {
     local failed_list=()
     local skipped_list=()
     local http_results=()
+    local html_results=()
     local screenshot_results=()
     local new_log_lines_count=0
     local fatal_errors_count=0
@@ -1837,6 +1981,10 @@ function run_update_for_project() {
     local pre_http_failed="false"
     local http_status_vorher=()
     local http_ms_vorher=()
+    local html_dir="$run_dir/html"
+    mkdir -p "$html_dir"
+    chmod 700 "$html_dir" 2>/dev/null || true
+    ensure_webroot_protection "$html_dir" "deny_all"
 
     for p in "${paths_array[@]}"; do
         check_http_endpoint "$SITE_URL" "$p" "$run_log"
@@ -1844,6 +1992,12 @@ function run_update_for_project() {
         local cur_ms="$HTTP_CHECK_MS"
         http_status_vorher+=("$cur_st")
         http_ms_vorher+=("$cur_ms")
+
+        local p_slug
+        p_slug="$(path_to_slug "$p")"
+        if [ -n "$HTTP_CHECK_BODY" ]; then
+            printf '%s' "$HTTP_CHECK_BODY" > "$html_dir/vorher_${p_slug}.html"
+        fi
 
         if [ "$cur_st" != "200" ]; then
             log_check_item "ROT" "Vorprüfung HTTP-Seite '$p' liefert Status $cur_st (erwartet: 200)" "$run_log"
@@ -2337,6 +2491,45 @@ function run_update_for_project() {
             [ "$final_exitcode" -lt 1 ] && final_exitcode=1
             [ "$final_status" == "gruen" ] && final_status="gelb"
         fi
+
+        # HTML-Kopie nach Update sichern und normalisiert vergleichen
+        local p_slug
+        p_slug="$(path_to_slug "$p")"
+        local html_vorher="$html_dir/vorher_${p_slug}.html"
+        local html_nachher="$html_dir/nachher_${p_slug}.html"
+        local html_diff="$html_dir/diff_${p_slug}.diff"
+        local html_vorher_rel="html/vorher_${p_slug}.html"
+        local html_nachher_rel="html/nachher_${p_slug}.html"
+        local html_diff_rel="html/diff_${p_slug}.diff"
+
+        if [ -n "$HTTP_CHECK_BODY" ]; then
+            printf '%s' "$HTTP_CHECK_BODY" > "$html_nachher"
+        fi
+
+        if [ "$st_after" == "200" ] && [ -f "$html_vorher" ] && [ -f "$html_nachher" ]; then
+            local cmp_out cmp_status cmp_reason cmp_len_b cmp_len_a
+            cmp_out=$(compare_html_files "$html_vorher" "$html_nachher" "$html_diff")
+            IFS='|' read -r cmp_status cmp_reason cmp_len_b cmp_len_a <<< "$cmp_out"
+
+            local diff_json_val="null"
+            [ -f "$html_diff" ] && diff_json_val="\"$(json_escape "$html_diff_rel")\""
+
+            if [ "$cmp_status" == "rot" ]; then
+                log_check_item "ROT" "HTML-Vergleich für '$p': $cmp_reason" "$run_log" "Diff prüfen: $html_diff"
+                status_reasons+=("HTML-Vergleich '$p': $cmp_reason")
+                final_status="rot"
+                final_exitcode=2
+            elif [ "$cmp_status" == "gelb" ]; then
+                log_check_item "WARN" "HTML-Vergleich für '$p': $cmp_reason" "$run_log" "Diff prüfen: $html_diff"
+                status_reasons+=("HTML-Vergleich '$p': $cmp_reason")
+                [ "$final_exitcode" -lt 1 ] && final_exitcode=1
+                [ "$final_status" == "gruen" ] && final_status="gelb"
+            else
+                log_check_item "OK" "HTML-Vergleich für '$p' unauffällig ($cmp_reason)" "$run_log"
+            fi
+
+            html_results+=("{\"pfad\": \"$(json_escape "$p")\", \"vorher\": \"$(json_escape "$html_vorher_rel")\", \"nachher\": \"$(json_escape "$html_nachher_rel")\", \"diff\": $diff_json_val, \"textlaenge_vorher\": ${cmp_len_b:-0}, \"textlaenge_nachher\": ${cmp_len_a:-0}, \"status\": \"$(json_escape "$cmp_status")\"}")
+        fi
     done
 
     # Visueller Screenshot-Vergleich nach Update
@@ -2532,6 +2725,14 @@ function write_and_output_result() {
     done
     screenshots_json+="]"
 
+    local html_vergleiche_json="["
+    local hv_first=1
+    for hv_res in "${html_results[@]}"; do
+        [ "$hv_first" -eq 1 ] && hv_first=0 || html_vergleiche_json+=", "
+        html_vergleiche_json+="$hv_res"
+    done
+    html_vergleiche_json+="]"
+
     local project_json
     project_json=$(cat <<EOF
 {
@@ -2547,6 +2748,7 @@ function write_and_output_result() {
   "fehlgeschlagen": $fehlgeschlagen_json,
   "uebersprungen": $uebersprungen_json,
   "http": $http_json,
+  "html_vergleiche": $html_vergleiche_json,
   "screenshots": $screenshots_json,
   "neue_logzeilen": $new_log_lines_count,
   "fatal_errors": $fatal_errors_count,

@@ -104,7 +104,7 @@ Skript zur sicheren Durchführung von WordPress Core-, Plugin-, Theme- und Sprac
   1. Lock-Datei pro Projekt verhindert parallele Ausführung
   2. **Vorprüfung**: `wp core is-installed`, kein Wartungsmodus, HTTP-Status 200 auf allen Prüfseiten und Vorkommen von `MUST_CONTAIN` auf der Startseite. Bei Vorfehlern sofortiger Abbruch (ROT = "schon vorher defekt")
   3. **Backup-Pflicht**: Führt vor dem Update `./backup_full_db_files_zip.sh --project=<name> --scope=alles --json` aus. Fortsetzung nur bei Exitcode 0 oder 1 (mit verifizierten Dateien). Bei `--no-backup` wird ein vorhandenes Backup verlangt, das jünger als `BACKUP_MAX_AGE_MIN` (Standard: 60 Min) und Status "ok" ist
-  4. **Stand vorher sichern**: Core-Version, Plugin-/Theme-Listen (`--format=json`), Zeilenzahlen der Logs und HTTP-Antwortzeiten werden in `update-runs/<projekt>/<datum>/` archiviert
+  4. **Stand vorher sichern**: Core-Version, Plugin-/Theme-Listen (`--format=json`), Zeilenzahlen der Logs, HTTP-Antwortzeiten sowie HTML-Kopien aller `CHECK_PATHS` (`html/vorher_<slug>.html`) werden in `update-runs/<projekt>/<datum>/` archiviert
   5. **Vorher-Screenshots**: Erstellt Desktop- und Mobile-Screenshots aller `SCREENSHOT_PATHS` über Gotenberg 9
   6. **Updates**: Core, Core-DB, Plugins (unter Ausschluss von `SKIP_PLUGINS`), Themes, Sprachen und Cache-Flush. Ein Einzelfehler stoppt Folgeschritte nicht
   7. **Nachprüfung (Post-Check)**:
@@ -112,6 +112,7 @@ Skript zur sicheren Durchführung von WordPress Core-, Plugin-, Theme- und Sprac
      - Plugin- und Theme-Versionsdiff
      - Log-Analyse auf neue Zeilen und Fatal Errors
      - HTTP-Status 200, `MUST_CONTAIN` und Fehlertext-Erkennung auf allen Prüfseiten
+     - **Normalisierter HTML-Vorher-/Nachher-Vergleich**: Sichert `html/nachher_<slug>.html` für alle `CHECK_PATHS`, entfernt Kommentare sowie `<script>`/`<style>`/`<noscript>`-Blöcke und prüft sichtbaren Text, `<title>` und `<h1>` (ROT bei > 50 % Textverlust oder verschwundenem `<title>`/`<h1>`, GELB bei abweichendem Inhalt inkl. Diff in `html/diff_<slug>.diff`)
      - Antwortzeit-Vergleich (> 2× Verlangsamung erzeugt Warnung)
      - **Nachher-Screenshots & Differenzanalyse**:
        - Maskiert optionale Ignore-Rechtecke und berechnet die Abweichung (ImageMagick `compare` / PHP-GD)

@@ -92,7 +92,7 @@ Skript zur sicheren Durchführung von WordPress Core-, Plugin-, Theme- und Sprac
 - **Zentraler Gotenberg 9 Screenshot-Dienst (`.gotenberg`)**:
   - Visuelle Vorher-/Nachher-Prüfung über eigenen Gotenberg 9 Chromium-Dienst (`https://gotenberg.gregor-wendland.com`)
   - Basic-Auth ohne Passwortübertragung in CLI/Prozessliste (`curl -K -`)
-  - Multi-Viewport (Desktop `1440px`, Mobile `390px`), `waitDelay`, Cookies und Ignore-Bereiche (`SCREENSHOT_IGNORE_RECTS`)
+  - Multi-Viewport (Desktop `1440px`, Mobile `390px`), `waitDelay` (Standard: `5s`), Cookies und Ignore-Bereiche (`SCREENSHOT_IGNORE_RECTS`)
   - Ampel-Schwellenwerte: $< 1.0\,\%$ GRÜN, $1.0 - 5.0\,\%$ GELB, $> 5.0\,\%$ ROT
   - Fällt Gotenberg aus, bricht das Update nicht ab, sondern meldet kontrolliert GELB
 - **Setup-Assistent (`--setup`)**:

@@ -737,7 +737,7 @@ function write_project_update_file() {
     local enable_screenshots="${10:-yes}"
     local screenshot_paths="${11:-}"
     local screenshot_widths="${12:-1440 390}"
-    local screenshot_wait="${13:-2s}"
+    local screenshot_wait="${13:-5s}"
     local screenshot_cookies="${14:-}"
     local screenshot_ignore_rects="${15:-}"
     local quoted_wp_path="$(quote_shell_value "$wp_path")"
@@ -788,7 +788,7 @@ SCREENSHOT_PATHS='$quoted_screenshot_paths'
 # Viewport-Breiten für Screenshots in CSS-Pixeln (Standard: "1440 390")
 SCREENSHOT_WIDTHS='$quoted_screenshot_widths'
 
-# Wartezeit vor Screenshot-Aufnahme in Gotenberg (Standard: "2s")
+# Wartezeit vor Screenshot-Aufnahme in Gotenberg (Standard: "5s")
 SCREENSHOT_WAIT='$quoted_screenshot_wait'
 
 # Optionale Cookies im JSON-Format (z. B. für Cookie-Consent / Banner)
@@ -924,7 +924,7 @@ function run_setup_wizard() {
         local current_enable_screenshots="yes"
         local current_screenshot_paths=""
         local current_screenshot_widths="1440 390"
-        local current_screenshot_wait="2s"
+        local current_screenshot_wait="5s"
         local current_screenshot_cookies=""
         local current_screenshot_ignore_rects=""
 
@@ -1568,7 +1568,7 @@ function capture_screenshot() {
     local target_url="$1"
     local output_file="$2"
     local width="${3:-1440}"
-    local wait_delay="${4:-2s}"
+    local wait_delay="${4:-5s}"
     local cookies_json="${5:-}"
     local log_target="${6:-/dev/null}"
 
@@ -1673,7 +1673,7 @@ function test_gotenberg_connection() {
     temp_file="$(mktemp "/tmp/gotenberg_test_XXXXXX.png" 2>/dev/null || echo "/tmp/gotenberg_test_$$.png")"
 
     echo "Sende Screenshot-Anfrage ..."
-    if capture_screenshot "$test_url" "$temp_file" "1440" "2s" "" "/dev/stderr"; then
+    if capture_screenshot "$test_url" "$temp_file" "1440" "5s" "" "/dev/stderr"; then
         local sz
         sz=$(get_file_size_bytes "$temp_file")
         log_check_item "OK" "Verbindung zu Gotenberg 9 erfolgreich! Screenshot empfangen ($sz Bytes, PNG)."
@@ -1888,7 +1888,7 @@ function run_update_for_project() {
     ENABLE_SCREENSHOTS="yes"
     SCREENSHOT_PATHS=""
     SCREENSHOT_WIDTHS="1440 390"
-    SCREENSHOT_WAIT="2s"
+    SCREENSHOT_WAIT="5s"
     SCREENSHOT_COOKIES=""
     SCREENSHOT_IGNORE_RECTS=""
     SCREENSHOT_DIFF_THRESHOLD_WARN="1.0"
@@ -2230,7 +2230,7 @@ function run_update_for_project() {
             IFS='|' read -r s_url s_slug s_label s_width <<< "$s_task"
             local file_vorher="$screenshots_dir/vorher_${s_slug}_${s_width}.png"
             echo "  Erstelle Vorher-Screenshot für $s_label ($s_width px) ..." | tee -a "$run_log"
-            if capture_screenshot "$s_url" "$file_vorher" "$s_width" "${SCREENSHOT_WAIT:-2s}" "$SCREENSHOT_COOKIES" "$run_log"; then
+            if capture_screenshot "$s_url" "$file_vorher" "$s_width" "${SCREENSHOT_WAIT:-5s}" "$SCREENSHOT_COOKIES" "$run_log"; then
                 log_check_item "OK" "Vorher-Screenshot für $s_label ($s_width px) erstellt ($(get_file_size_bytes "$file_vorher") Bytes)" "$run_log"
             else
                 log_check_item "WARN" "Vorher-Screenshot für $s_label ($s_width px) fehlgeschlagen (Gotenberg nicht erreichbar oder ungültig)" "$run_log"
@@ -2553,7 +2553,7 @@ function run_update_for_project() {
 
             if [ -f "$file_vorher" ]; then
                 echo "  Erstelle Nachher-Screenshot für $s_label ($s_width px) ..." | tee -a "$run_log"
-                if capture_screenshot "$s_url" "$file_nachher" "$s_width" "${SCREENSHOT_WAIT:-2s}" "$SCREENSHOT_COOKIES" "$run_log"; then
+                if capture_screenshot "$s_url" "$file_nachher" "$s_width" "${SCREENSHOT_WAIT:-5s}" "$SCREENSHOT_COOKIES" "$run_log"; then
                     local tmp_before tmp_after
                     tmp_before="$(mktemp "/tmp/wp_s_bef_XXXXXX.png" 2>/dev/null || echo "/tmp/wp_s_bef_$$.png")"
                     tmp_after="$(mktemp "/tmp/wp_s_aft_XXXXXX.png" 2>/dev/null || echo "/tmp/wp_s_aft_$$.png")"

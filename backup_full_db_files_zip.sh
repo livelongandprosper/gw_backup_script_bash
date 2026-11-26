@@ -93,6 +93,8 @@ cli_scan_wp='false'
 cli_scan_wp_path=''
 cli_json='false'
 cli_quiet='false'
+retention_dry_run='false'
+cli_source_only='false'
 
 for cli_arg in "$@"; do
     case "$cli_arg" in
@@ -104,6 +106,9 @@ for cli_arg in "$@"; do
             ;;
         --restore)
             restore_mode='true'
+            ;;
+        --retention-dry-run)
+            retention_dry_run='true'
             ;;
         --check|--pre-check)
             check_mode='true'
@@ -130,6 +135,9 @@ for cli_arg in "$@"; do
         --quiet|-q)
             cli_quiet='true'
             ;;
+        --source-only)
+            cli_source_only='true'
+            ;;
         --help|-h)
             echo "Verwendung: $0 [OPTIONEN]"
             echo
@@ -137,6 +145,7 @@ for cli_arg in "$@"; do
             echo "  --project=<name>|alle   Projekt-Konfiguration (.env.<name>), die verwendet werden soll."
             echo "                          'alle' verarbeitet nacheinander alle gefundenen Projekte."
             echo "  --scope=alles|db|dateien Was gesichert werden soll: alles (Standard), db oder dateien."
+            echo "  --retention-dry-run     Prüft Aufbewahrungsregeln (Staffel/GVS) und zeigt Tabellenvorschau."
             echo "  --restore               Datenbank aus vorhandenem Backup wiederherstellen (interaktiv)."
             echo "  --check|--pre-check     Pre-Backup & Sicherheitsprüfungen für das Projekt durchführen."
             echo "  --scan-wp[=<ordner>]    Sucht nach WordPress-Installationen (Standard: ..) und richtet .env ein."
@@ -189,6 +198,7 @@ function json_escape() {
 
 # Erzeugt ein JSON-String-Array aus den übergebenen Argumenten
 function json_string_array() {
+    [ $# -eq 0 ] && { printf "[]"; return 0; }
     local items=("$@")
     local out="["
     local first=1
@@ -240,6 +250,740 @@ function normalize_scope() {
             echo ""
             ;;
     esac
+}
+
+# Formatiert Byte-Werte lesbar (z.B. "142.50 MB", "1.20 GB")
+function format_bytes_human() {
+    local b="${1:-0}"
+    if ! [[ "$b" =~ ^[0-9]+$ ]]; then
+        echo "0 B"
+        return
+    fi
+    if [ "$b" -ge 1073741824 ]; then
+        awk "BEGIN {printf \"%.2f GB\", $b / 1073741824}"
+    elif [ "$b" -ge 1048576 ]; then
+        awk "BEGIN {printf \"%.2f MB\", $b / 1048576}"
+    elif [ "$b" -ge 1024 ]; then
+        awk "BEGIN {printf \"%.2f KB\", $b / 1024}"
+    else
+        echo "${b} B"
+    fi
+}
+
+# Parst einen Backup-Dateinamen und extrahiert Metadaten
+# Rückgabe via globale Variablen:
+#   PARSED_BACKUP_VALID (1=gültig, 0=ungültig/fremd)
+#   PARSED_BACKUP_TS (YYYY-MM-DD_HH-MM-SS)
+#   PARSED_BACKUP_TYPE ("db" / "files")
+#   PARSED_BACKUP_DBNAME (Name der Datenbank bei Typ "db")
+function parse_backup_filename() {
+    local filename="$1"
+    local project_basis="$2"
+
+    filename="$(basename "$filename")"
+    PARSED_BACKUP_VALID=0
+    PARSED_BACKUP_TS=""
+    PARSED_BACKUP_TYPE=""
+    PARSED_BACKUP_DBNAME=""
+
+    # Muss zwingend mit dem Projekt-Basisdateinamen + "_" beginnen
+    local prefix="${project_basis}_"
+    if [[ "$filename" != "$prefix"* ]]; then
+        return 1
+    fi
+
+    local rest="${filename#$prefix}"
+    # Zeitstempel YYYY-MM-DD_HH-MM-SS prüfen
+    if [[ "$rest" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2})_(.*)$ ]]; then
+        local ts="${BASH_REMATCH[1]}"
+        local suffix="${BASH_REMATCH[2]}"
+
+        if [ "$suffix" = "files.zip" ] || [ "$suffix" = "files" ]; then
+            PARSED_BACKUP_VALID=1
+            PARSED_BACKUP_TS="$ts"
+            PARSED_BACKUP_TYPE="files"
+            PARSED_BACKUP_DBNAME=""
+            return 0
+        elif [[ "$suffix" == *.sql.zip ]]; then
+            PARSED_BACKUP_VALID=1
+            PARSED_BACKUP_TS="$ts"
+            PARSED_BACKUP_TYPE="db"
+            PARSED_BACKUP_DBNAME="${suffix%.sql.zip}"
+            return 0
+        elif [[ "$suffix" == *.sql ]]; then
+            PARSED_BACKUP_VALID=1
+            PARSED_BACKUP_TS="$ts"
+            PARSED_BACKUP_TYPE="db"
+            PARSED_BACKUP_DBNAME="${suffix%.sql}"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+# Ermittelt Portabel (macOS & Linux) Epoch, Alter in Tagen, ISO-Woche und Monat eines Zeitstempels
+# Rückgabe via globale Variablen:
+#   PARSED_TS_EPOCH, PARSED_TS_AGE_DAYS, PARSED_TS_ISO_WEEK, PARSED_TS_MONTH
+function parse_timestamp_date_info() {
+    local ts="$1"
+    local now_epoch="${2:-$(date +%s)}"
+    local epoch=""
+    local iso_week=""
+    local cal_month=""
+
+    # BSD date (macOS)
+    local out
+    out="$(date -j -f "%Y-%m-%d_%H-%M-%S" "$ts" "+%s %G-W%V %Y-%m" 2>/dev/null || true)"
+    if [ -z "$out" ]; then
+        # GNU date (Linux)
+        local formatted_dt="${ts:0:10} ${ts:11:2}:${ts:14:2}:${ts:17:2}"
+        out="$(date -d "$formatted_dt" "+%s %G-W%V %Y-%m" 2>/dev/null || true)"
+    fi
+
+    if [ -n "$out" ]; then
+        read -r epoch iso_week cal_month <<< "$out"
+    else
+        epoch=0
+        iso_week="${ts:0:4}-W00"
+        cal_month="${ts:0:7}"
+    fi
+
+    local age_s=$((now_epoch - epoch))
+    local age_days=0
+    if [ "$age_s" -gt 0 ]; then
+        age_days=$((age_s / 86400))
+    fi
+
+    PARSED_TS_EPOCH="$epoch"
+    PARSED_TS_AGE_DAYS="$age_days"
+    PARSED_TS_ISO_WEEK="$iso_week"
+    PARSED_TS_MONTH="$cal_month"
+}
+
+# Fasst gefundene Dateien zu atomaren Backup-Sätzen nach Zeitstempel zusammen
+# Eingabe:
+#   $1: project_basis
+#   $2: expect_files (true/false)
+#   $3..$N: expected_db_names
+# Liest globale Arrays RAW_FILES und RAW_SIZES
+# Füllt globale Ergebnis-Arrays (sortiert absteigend nach Zeitstempel):
+#   SET_TIMESTAMPS, SET_IS_COMPLETE, SET_BYTES, SET_FILES_COUNT, SET_FILE_LIST, SET_SCOPE_DESC
+function group_backup_sets() {
+    local project_basis="$1"
+    local expect_files="$2"
+    shift 2
+    local expected_dbs=("$@")
+
+    SET_TIMESTAMPS=()
+    SET_IS_COMPLETE=()
+    SET_BYTES=()
+    SET_FILES_COUNT=()
+    SET_FILE_LIST=()
+    SET_SCOPE_DESC=()
+
+    local raw_count="${#RAW_FILES[@]}"
+    [ "$raw_count" -eq 0 ] && return 0
+
+    local parsed_lines=()
+    local i
+    for ((i=0; i<raw_count; i++)); do
+        local fname="${RAW_FILES[$i]}"
+        local fsize="${RAW_SIZES[$i]:-0}"
+        if parse_backup_filename "$fname" "$project_basis"; then
+            local dbname_clean="${PARSED_BACKUP_DBNAME:--}"
+            parsed_lines+=("$PARSED_BACKUP_TS|$PARSED_BACKUP_TYPE|$dbname_clean|$fsize|$(basename "$fname")")
+        fi
+    done
+
+    [ "${#parsed_lines[@]}" -eq 0 ] && return 0
+
+    local sorted_records
+    sorted_records="$(printf "%s\n" "${parsed_lines[@]}" | sort -r -t'|' -k1,1)"
+
+    local current_ts=""
+    local set_bytes=0
+    local set_files_count=0
+    local set_file_list=()
+    local set_dbs=()
+    local set_has_files=0
+
+    _finalize_set() {
+        [ -z "$current_ts" ] && return 0
+
+        local is_complete=1
+        local missing_items=()
+
+        if [ "$expect_files" = "true" ] && [ "$set_has_files" -ne 1 ]; then
+            is_complete=0
+            missing_items+=("files")
+        fi
+
+        local exp_db
+        for exp_db in "${expected_dbs[@]}"; do
+            [ -z "$exp_db" ] && continue
+            local found_db=0
+            local s_db
+            for s_db in "${set_dbs[@]}"; do
+                if [ "$s_db" = "$exp_db" ]; then
+                    found_db=1
+                    break
+                fi
+            done
+            if [ "$found_db" -ne 1 ]; then
+                is_complete=0
+                missing_items+=("DB:$exp_db")
+            fi
+        done
+
+        local scope_desc=""
+        if [ "${#set_dbs[@]}" -gt 0 ] && [ "$set_has_files" -eq 1 ]; then
+            scope_desc="${#set_dbs[@]} DBs + files"
+        elif [ "${#set_dbs[@]}" -gt 0 ]; then
+            scope_desc="${#set_dbs[@]} DB(s)"
+        elif [ "$set_has_files" -eq 1 ]; then
+            scope_desc="files"
+        else
+            scope_desc="leer"
+        fi
+
+        if [ "$is_complete" -ne 1 ] && [ "${#missing_items[@]}" -gt 0 ]; then
+            scope_desc="$scope_desc (unvollständig: fehlt ${missing_items[*]})"
+        fi
+
+        SET_TIMESTAMPS+=("$current_ts")
+        SET_IS_COMPLETE+=("$is_complete")
+        SET_BYTES+=("$set_bytes")
+        SET_FILES_COUNT+=("$set_files_count")
+        SET_FILE_LIST+=("${set_file_list[*]}")
+        SET_SCOPE_DESC+=("$scope_desc")
+    }
+
+    while IFS='|' read -r r_ts r_type r_dbname r_size r_fname; do
+        [ -z "$r_ts" ] && continue
+        if [ "$r_ts" != "$current_ts" ]; then
+            _finalize_set
+            current_ts="$r_ts"
+            set_bytes=0
+            set_files_count=0
+            set_file_list=()
+            set_dbs=()
+            set_has_files=0
+        fi
+
+        set_bytes=$((set_bytes + r_size))
+        set_files_count=$((set_files_count + 1))
+        set_file_list+=("$r_fname")
+        if [ "$r_type" = "db" ]; then
+            [ "$r_dbname" != "-" ] && set_dbs+=("$r_dbname")
+        elif [ "$r_type" = "files" ]; then
+            set_has_files=1
+        fi
+    done <<< "$sorted_records"
+    _finalize_set
+}
+
+# Wendet Aufbewahrungsregeln (Großvater-Vater-Sohn / Staffel, Tage oder Aus) auf gruppierte Sätze an
+# Parameter:
+#   $1: mode ('staffel', 'tage', 'aus')
+#   $2: daily_days (Standard: 30)
+#   $3: weekly_days (Standard: 90)
+#   $4: monthly_days (Standard: 365, 0 = unbegrenzt)
+#   $5: min_sets (Standard: 3)
+#   $6: now_epoch (Standard: aktuelle Zeit)
+# Füllt globale Ergebnis-Arrays:
+#   SET_DECISIONS ("BEHALTEN" / "LOESCHEN")
+#   SET_REASONS ("taeglich", "woechentlich", "monatlich", "minimum", "unvollstaendig_alt", "unvollstaendig_neu", "tage_abgelaufen", "zu_alt", "retention_aus")
+#   SET_AGE_DAYS, SET_ISO_WEEKS, SET_MONTHS
+function evaluate_retention_sets() {
+    local mode="${1:-staffel}"
+    local daily_days="${2:-30}"
+    local weekly_days="${3:-90}"
+    local monthly_days="${4:-365}"
+    local min_sets="${5:-3}"
+    local now_epoch="${6:-$(date +%s)}"
+
+    local count="${#SET_TIMESTAMPS[@]}"
+    SET_DECISIONS=()
+    SET_REASONS=()
+    SET_AGE_DAYS=()
+    SET_ISO_WEEKS=()
+    SET_MONTHS=()
+
+    local i
+    for ((i=0; i<count; i++)); do
+        local ts="${SET_TIMESTAMPS[$i]}"
+        parse_timestamp_date_info "$ts" "$now_epoch"
+        SET_AGE_DAYS[$i]="$PARSED_TS_AGE_DAYS"
+        SET_ISO_WEEKS[$i]="$PARSED_TS_ISO_WEEK"
+        SET_MONTHS[$i]="$PARSED_TS_MONTH"
+    done
+
+    if [ "$mode" = "aus" ]; then
+        for ((i=0; i<count; i++)); do
+            SET_DECISIONS[$i]="BEHALTEN"
+            SET_REASONS[$i]="retention_aus"
+        done
+        return 0
+    fi
+
+    if [ "$mode" = "tage" ]; then
+        local succ_rank=0
+        local has_newer_complete=0
+        for ((i=0; i<count; i++)); do
+            local is_comp="${SET_IS_COMPLETE[$i]}"
+            local age="${SET_AGE_DAYS[$i]}"
+
+            if [ "$is_comp" = "1" ] || [ "$is_comp" = "true" ]; then
+                succ_rank=$((succ_rank + 1))
+                has_newer_complete=1
+                if [ "$succ_rank" -le "$min_sets" ]; then
+                    SET_DECISIONS[$i]="BEHALTEN"
+                    SET_REASONS[$i]="minimum"
+                elif [ "$daily_days" -eq 0 ] || [ "$age" -le "$daily_days" ]; then
+                    SET_DECISIONS[$i]="BEHALTEN"
+                    SET_REASONS[$i]="taeglich"
+                else
+                    SET_DECISIONS[$i]="LOESCHEN"
+                    SET_REASONS[$i]="tage_abgelaufen"
+                fi
+            else
+                if [ "$age" -le 7 ]; then
+                    SET_DECISIONS[$i]="BEHALTEN"
+                    SET_REASONS[$i]="unvollstaendig_neu"
+                elif [ "$has_newer_complete" -eq 1 ]; then
+                    SET_DECISIONS[$i]="LOESCHEN"
+                    SET_REASONS[$i]="unvollstaendig_alt"
+                else
+                    SET_DECISIONS[$i]="BEHALTEN"
+                    SET_REASONS[$i]="minimum"
+                fi
+            fi
+        done
+        return 0
+    fi
+
+    # mode == "staffel"
+    local seen_weeks=" "
+    local seen_months=" "
+    local succ_rank=0
+    local has_newer_complete=0
+
+    for ((i=0; i<count; i++)); do
+        local is_comp="${SET_IS_COMPLETE[$i]}"
+        local age="${SET_AGE_DAYS[$i]}"
+        local week="${SET_ISO_WEEKS[$i]}"
+        local month="${SET_MONTHS[$i]}"
+
+        if [ "$is_comp" != "1" ] && [ "$is_comp" != "true" ]; then
+            if [ "$age" -le 7 ]; then
+                SET_DECISIONS[$i]="BEHALTEN"
+                SET_REASONS[$i]="unvollstaendig_neu"
+            elif [ "$has_newer_complete" -eq 1 ]; then
+                SET_DECISIONS[$i]="LOESCHEN"
+                SET_REASONS[$i]="unvollstaendig_alt"
+            else
+                SET_DECISIONS[$i]="BEHALTEN"
+                SET_REASONS[$i]="minimum"
+            fi
+            continue
+        fi
+
+        # Vollständiger Satz
+        succ_rank=$((succ_rank + 1))
+        has_newer_complete=1
+
+        # 1. Tägliche Staffel (alle Sätze bis daily_days)
+        if [ "$age" -le "$daily_days" ]; then
+            SET_DECISIONS[$i]="BEHALTEN"
+            SET_REASONS[$i]="taeglich"
+            seen_weeks="${seen_weeks}${week} "
+            seen_months="${seen_months}${month} "
+
+        # 2. Wöchentliche Staffel (bis weekly_days: jüngster Satz der ISO-Woche)
+        elif [ "$age" -le "$weekly_days" ]; then
+            if [[ "$seen_weeks" != *" $week "* ]]; then
+                SET_DECISIONS[$i]="BEHALTEN"
+                SET_REASONS[$i]="woechentlich"
+                seen_weeks="${seen_weeks}${week} "
+                seen_months="${seen_months}${month} "
+            elif [ "$succ_rank" -le "$min_sets" ]; then
+                SET_DECISIONS[$i]="BEHALTEN"
+                SET_REASONS[$i]="minimum"
+            else
+                SET_DECISIONS[$i]="LOESCHEN"
+                SET_REASONS[$i]="zu_alt"
+            fi
+
+        # 3. Monatliche Staffel (bis monthly_days oder unbegrenzt wenn 0: jüngster Satz des Kalendermonats)
+        elif [ "$monthly_days" -eq 0 ] || [ "$age" -le "$monthly_days" ]; then
+            if [[ "$seen_months" != *" $month "* ]]; then
+                SET_DECISIONS[$i]="BEHALTEN"
+                SET_REASONS[$i]="monatlich"
+                seen_months="${seen_months}${month} "
+            elif [ "$succ_rank" -le "$min_sets" ]; then
+                SET_DECISIONS[$i]="BEHALTEN"
+                SET_REASONS[$i]="minimum"
+            else
+                SET_DECISIONS[$i]="LOESCHEN"
+                SET_REASONS[$i]="zu_alt"
+            fi
+
+        # 4. Älter als monatliche Grenze
+        else
+            if [ "$succ_rank" -le "$min_sets" ]; then
+                SET_DECISIONS[$i]="BEHALTEN"
+                SET_REASONS[$i]="minimum"
+            else
+                SET_DECISIONS[$i]="LOESCHEN"
+                SET_REASONS[$i]="zu_alt"
+            fi
+        fi
+    done
+}
+
+# Führt die lokale Aufbewahrungsbereinigung für ein Projekt durch
+# Parameter:
+#   $1: project_env_file
+#   $2: is_dry_run ("true"/"false")
+#   $3: log_target (Standard: /dev/null)
+#   $4: allow_delete ("true"/"false", Standard: "true")
+function apply_retention_local() {
+    local p_env="$1"
+    local is_dry_run="${2:-false}"
+    local log_target="${3:-/dev/null}"
+    local allow_delete="${4:-true}"
+
+    RETENTION_LOCAL_KEPT=0
+    RETENTION_LOCAL_DELETED=0
+    RETENTION_LOCAL_FREED_BYTES=0
+
+    [ -f "$p_env" ] || return 0
+    local p_name
+    p_name="$(project_name_from_env_file "$p_env")"
+
+    local PROJEKT_BASIS_DATEINAME=""
+    local RETENTION_MODE=""
+    local BACKUP_LIVE_TIME=""
+    local KEEP_DAILY_DAYS=""
+    local KEEP_WEEKLY_DAYS=""
+    local KEEP_MONTHLY_DAYS=""
+    local KEEP_MIN_SETS=""
+    local SOURCE_FILES_DIR=""
+    local DB_COUNT=""
+    local DB_NAME=""
+    local DB2_NAME=""
+
+    # shellcheck source=/dev/null
+    source "$p_env"
+
+    local p_env_dir
+    p_env_dir="$(cd "$(dirname "$p_env")" && pwd)"
+    local p_basis="${PROJEKT_BASIS_DATEINAME:-$p_name}"
+    local backup_dir="$p_env_dir/$p_basis/"
+    [ -d "$backup_dir" ] || return 0
+
+    local ret_mode="${RETENTION_MODE:-}"
+    if [ -z "$ret_mode" ]; then
+        if [ -n "$BACKUP_LIVE_TIME" ] && [ "$BACKUP_LIVE_TIME" -gt 0 ] 2>/dev/null; then
+            ret_mode="tage"
+        else
+            ret_mode="aus"
+        fi
+    fi
+
+    local daily_days="${KEEP_DAILY_DAYS:-${BACKUP_LIVE_TIME:-30}}"
+    local weekly_days="${KEEP_WEEKLY_DAYS:-90}"
+    local monthly_days="${KEEP_MONTHLY_DAYS:-365}"
+    local min_sets="${KEEP_MIN_SETS:-3}"
+
+    local expect_files="false"
+    [ -n "$SOURCE_FILES_DIR" ] && expect_files="true"
+
+    local exp_dbs=()
+    if [ -n "$DB_COUNT" ] && [ "$DB_COUNT" -gt 0 ] 2>/dev/null; then
+        local d_i
+        for ((d_i=1; d_i<=DB_COUNT; d_i++)); do
+            local d_var="DB_${d_i}_NAME"
+            [ -n "${!d_var:-}" ] && exp_dbs+=("${!d_var}")
+        done
+    else
+        [ -n "$DB_NAME" ] && exp_dbs+=("$DB_NAME")
+        [ -n "$DB2_NAME" ] && exp_dbs+=("$DB2_NAME")
+    fi
+
+    RAW_FILES=()
+    RAW_SIZES=()
+    local f
+    for f in "$backup_dir"*; do
+        [ -f "$f" ] || continue
+        local fname
+        fname="$(basename "$f")"
+        if parse_backup_filename "$fname" "$p_basis"; then
+            RAW_FILES+=("$fname")
+            RAW_SIZES+=("$(get_file_size_bytes "$f")")
+        fi
+    done
+
+    [ "${#RAW_FILES[@]}" -eq 0 ] && return 0
+
+    group_backup_sets "$p_basis" "$expect_files" "${exp_dbs[@]}"
+    evaluate_retention_sets "$ret_mode" "$daily_days" "$weekly_days" "$monthly_days" "$min_sets"
+
+    local s_idx
+    for ((s_idx=0; s_idx<${#SET_TIMESTAMPS[@]}; s_idx++)); do
+        local ts="${SET_TIMESTAMPS[$s_idx]}"
+        local dec="${SET_DECISIONS[$s_idx]}"
+        local rsn="${SET_REASONS[$s_idx]}"
+        local s_bytes="${SET_BYTES[$s_idx]}"
+        local s_fcount="${SET_FILES_COUNT[$s_idx]}"
+        local s_flist="${SET_FILE_LIST[$s_idx]}"
+
+        if [ "$dec" = "BEHALTEN" ]; then
+            RETENTION_LOCAL_KEPT=$((RETENTION_LOCAL_KEPT + 1))
+        else
+            RETENTION_LOCAL_DELETED=$((RETENTION_LOCAL_DELETED + 1))
+            RETENTION_LOCAL_FREED_BYTES=$((RETENTION_LOCAL_FREED_BYTES + s_bytes))
+
+            if [ "$is_dry_run" != "true" ] && [ "$allow_delete" = "true" ]; then
+                echo "[RETENTION][LOKAL] Lösche Satz $ts (Grund: $rsn, $s_fcount Dateien, $(format_bytes_human "$s_bytes"))" | tee -a "$log_target"
+                local del_f
+                for del_f in $s_flist; do
+                    if parse_backup_filename "$del_f" "$p_basis"; then
+                        rm -f "$backup_dir$del_f"
+                        echo "  [LOKAL] gelöscht: $del_f" | tee -a "$log_target"
+                    fi
+                done
+            fi
+        fi
+    done
+
+    # Alte Logs bereinigen, wenn im Staffel-Modus
+    if [ "$is_dry_run" != "true" ] && [ "$allow_delete" = "true" ]; then
+        local log_clean_days="$daily_days"
+        [ "$log_clean_days" -lt 30 ] && log_clean_days=30
+        find "$basename/log" -maxdepth 1 -type f -name "${p_basis}_*.log" -mtime +"$log_clean_days" -delete 2>/dev/null || true
+    fi
+
+    return 0
+}
+
+# Führt die entfernte Aufbewahrungsbereinigung via SFTP-Batch durch
+# Parameter:
+#   $1: project_env_file
+#   $2: is_dry_run ("true"/"false")
+#   $3: log_target (Standard: /dev/null)
+#   $4: allow_delete ("true"/"false", Standard: "true")
+function apply_retention_remote() {
+    local p_env="$1"
+    local is_dry_run="${2:-false}"
+    local log_target="${3:-/dev/null}"
+    local allow_delete="${4:-true}"
+
+    RETENTION_REMOTE_KEPT=0
+    RETENTION_REMOTE_DELETED=0
+    RETENTION_REMOTE_FREED_BYTES=0
+    RETENTION_REMOTE_ERROR=""
+
+    [ -f "$p_env" ] || return 0
+    local p_name
+    p_name="$(project_name_from_env_file "$p_env")"
+
+    local PROJEKT_BASIS_DATEINAME=""
+    local RETENTION_MODE=""
+    local BACKUP_LIVE_TIME=""
+    local KEEP_DAILY_DAYS=""
+    local KEEP_WEEKLY_DAYS=""
+    local KEEP_MONTHLY_DAYS=""
+    local KEEP_MIN_SETS=""
+    local RETENTION_REMOTE="yes"
+    local SOURCE_FILES_DIR=""
+    local DB_COUNT=""
+    local DB_NAME=""
+    local DB2_NAME=""
+
+    local SFTP_HOST=""
+    local SFTP_PORT="22"
+    local SFTP_USER=""
+    local SFTP_KEY=""
+    local SFTP_DIRECTORY=""
+    local SFTP_PATH_TO_SSH_BINARY=""
+
+    local RSYNC_HOST=""
+    local RSYNC_USER=""
+    local RSYNC_KEY=""
+    local RSYNC_DIRECTORY=""
+
+    # shellcheck source=/dev/null
+    source "$p_env"
+
+    local p_basis="${PROJEKT_BASIS_DATEINAME:-$p_name}"
+
+    # Prüfen, ob RETENTION_REMOTE auf 'no' steht
+    if [ "$RETENTION_REMOTE" = "no" ] || [ "$RETENTION_REMOTE" = "false" ]; then
+        return 0
+    fi
+
+    # Remote-Zugangsdaten identifizieren
+    local r_host=""
+    local r_user=""
+    local r_port="22"
+    local r_key=""
+    local r_dir=""
+    local r_ssh="${SFTP_PATH_TO_SSH_BINARY:-$(command -v ssh)}"
+
+    if [ -n "$SFTP_HOST" ]; then
+        r_host="$SFTP_HOST"
+        r_user="$SFTP_USER"
+        r_port="${SFTP_PORT:-22}"
+        r_key="$SFTP_KEY"
+        r_dir="$SFTP_DIRECTORY"
+    elif [ -n "$RSYNC_HOST" ]; then
+        r_host="$RSYNC_HOST"
+        r_user="$RSYNC_USER"
+        r_port="22"
+        r_key="$RSYNC_KEY"
+        r_dir="$RSYNC_DIRECTORY"
+        r_ssh="$(command -v ssh)"
+    else
+        # Kein Remote-Ziel konfiguriert
+        return 0
+    fi
+
+    local ret_mode="${RETENTION_MODE:-}"
+    if [ -z "$ret_mode" ]; then
+        if [ -n "$BACKUP_LIVE_TIME" ] && [ "$BACKUP_LIVE_TIME" -gt 0 ] 2>/dev/null; then
+            ret_mode="tage"
+        else
+            ret_mode="aus"
+        fi
+    fi
+
+    local daily_days="${KEEP_DAILY_DAYS:-${BACKUP_LIVE_TIME:-30}}"
+    local weekly_days="${KEEP_WEEKLY_DAYS:-90}"
+    local monthly_days="${KEEP_MONTHLY_DAYS:-365}"
+    local min_sets="${KEEP_MIN_SETS:-3}"
+
+    local expect_files="false"
+    [ -n "$SOURCE_FILES_DIR" ] && expect_files="true"
+
+    local exp_dbs=()
+    if [ -n "$DB_COUNT" ] && [ "$DB_COUNT" -gt 0 ] 2>/dev/null; then
+        local d_i
+        for ((d_i=1; d_i<=DB_COUNT; d_i++)); do
+            local d_var="DB_${d_i}_NAME"
+            [ -n "${!d_var:-}" ] && exp_dbs+=("${!d_var}")
+        done
+    else
+        [ -n "$DB_NAME" ] && exp_dbs+=("$DB_NAME")
+        [ -n "$DB2_NAME" ] && exp_dbs+=("$DB2_NAME")
+    fi
+
+    # SFTP Batch zur Dateiliste erstellen
+    local sftp_ls_batch="$basename/.${p_basis}_sftp_ls_$$"
+    if [ -n "$r_dir" ]; then
+        echo "cd \"$r_dir\"" > "$sftp_ls_batch"
+    else
+        : > "$sftp_ls_batch"
+    fi
+    echo "ls -l" >> "$sftp_ls_batch"
+    echo "exit" >> "$sftp_ls_batch"
+
+    local ssh_opts=(-o "PubkeyAuthentication=yes" -o "Port=$r_port" -o "ConnectTimeout=15" -o "BatchMode=yes" -o "StrictHostKeyChecking=accept-new")
+    if [ -n "$r_key" ]; then
+        ssh_opts+=(-o "IdentityFile=$r_key")
+    fi
+
+    local sftp_out
+    sftp_out=$(sftp -S "$r_ssh" "${ssh_opts[@]}" -b "$sftp_ls_batch" "$r_user@$r_host" 2>&1)
+    local sftp_rc=$?
+    rm -f "$sftp_ls_batch"
+
+    if [ "$sftp_rc" -ne 0 ]; then
+        RETENTION_REMOTE_ERROR="SFTP-Verbindungsfehler beim Auflisten (Status: $sftp_rc)"
+        echo "Warnung: Remote-Dateiliste für '$p_name' konnte nicht per SFTP abgefragt werden (Status: $sftp_rc)." | tee -a "$log_target" >&2
+        return 1
+    fi
+
+    RAW_FILES=()
+    RAW_SIZES=()
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[-l] ]] || continue
+        local f_size
+        local f_name
+        f_size=$(echo "$line" | awk '{print $5}')
+        f_name=$(echo "$line" | awk '{for(i=9;i<=NF;++i) printf "%s%s", $i, (i==NF?"":" ")}')
+        [ -z "$f_name" ] && continue
+        if parse_backup_filename "$f_name" "$p_basis"; then
+            RAW_FILES+=("$f_name")
+            RAW_SIZES+=("${f_size:-0}")
+        fi
+    done <<< "$sftp_out"
+
+    [ "${#RAW_FILES[@]}" -eq 0 ] && return 0
+
+    group_backup_sets "$p_basis" "$expect_files" "${exp_dbs[@]}"
+    evaluate_retention_sets "$ret_mode" "$daily_days" "$weekly_days" "$monthly_days" "$min_sets"
+
+    local files_to_delete_remote=()
+    local s_idx
+    for ((s_idx=0; s_idx<${#SET_TIMESTAMPS[@]}; s_idx++)); do
+        local ts="${SET_TIMESTAMPS[$s_idx]}"
+        local dec="${SET_DECISIONS[$s_idx]}"
+        local rsn="${SET_REASONS[$s_idx]}"
+        local s_bytes="${SET_BYTES[$s_idx]}"
+        local s_fcount="${SET_FILES_COUNT[$s_idx]}"
+        local s_flist="${SET_FILE_LIST[$s_idx]}"
+
+        if [ "$dec" = "BEHALTEN" ]; then
+            RETENTION_REMOTE_KEPT=$((RETENTION_REMOTE_KEPT + 1))
+        else
+            RETENTION_REMOTE_DELETED=$((RETENTION_REMOTE_DELETED + 1))
+            RETENTION_REMOTE_FREED_BYTES=$((RETENTION_REMOTE_FREED_BYTES + s_bytes))
+
+            if [ "$is_dry_run" != "true" ] && [ "$allow_delete" = "true" ]; then
+                echo "[RETENTION][REMOTE] Lösche Satz $ts (Grund: $rsn, $s_fcount Dateien, $(format_bytes_human "$s_bytes"))" | tee -a "$log_target"
+                local del_f
+                for del_f in $s_flist; do
+                    if parse_backup_filename "$del_f" "$p_basis"; then
+                        files_to_delete_remote+=("$del_f")
+                    fi
+                done
+            fi
+        fi
+    done
+
+    # Löschungen per SFTP-Batch ausführen
+    if [ "$is_dry_run" != "true" ] && [ "$allow_delete" = "true" ] && [ "${#files_to_delete_remote[@]}" -gt 0 ]; then
+        local sftp_rm_batch="$basename/.${p_basis}_sftp_rm_$$"
+        if [ -n "$r_dir" ]; then
+            echo "cd \"$r_dir\"" > "$sftp_rm_batch"
+        else
+            : > "$sftp_rm_batch"
+        fi
+        local rf
+        for rf in "${files_to_delete_remote[@]}"; do
+            echo "rm \"$rf\"" >> "$sftp_rm_batch"
+        done
+        echo "exit" >> "$sftp_rm_batch"
+
+        local rm_out
+        rm_out=$(sftp -S "$r_ssh" "${ssh_opts[@]}" -b "$sftp_rm_batch" "$r_user@$r_host" 2>&1)
+        local rm_rc=$?
+        rm -f "$sftp_rm_batch"
+
+        if [ "$rm_rc" -ne 0 ]; then
+            RETENTION_REMOTE_ERROR="SFTP-Löschfehler (Status: $rm_rc)"
+            echo "Warnung: Fehler beim Remote-Löschen per SFTP (Status: $rm_rc): $rm_out" | tee -a "$log_target" >&2
+            return 1
+        else
+            for rf in "${files_to_delete_remote[@]}"; do
+                echo "  [REMOTE] gelöscht: $rf" | tee -a "$log_target"
+            done
+        fi
+    fi
+
+    return 0
 }
 
 # Erstellt/aktualisiert Apache-Schutzregeln (.htaccess) für Verzeichnisse (Webroot-Sicherheit für Apache 2.4 & 2.2)
@@ -567,6 +1311,30 @@ function parse_wp_config_file() {
     WP_PARSED_SCRIPT_DEBUG="$(extract_wp_constant_sed "$wp_config_file" SCRIPT_DEBUG)"
 }
 
+# Sucht in einem Ordner oder übergeordneten Ordnern nach wp-config.php
+function find_wp_config_in_path() {
+    local base_dir="$1"
+    [ -d "$base_dir" ] || return 1
+
+    local candidates=(
+        "$base_dir/wp-config.php"
+        "$base_dir/public_html/wp-config.php"
+        "$base_dir/htdocs/wp-config.php"
+        "$base_dir/web/wp-config.php"
+        "$base_dir/wordpress/wp-config.php"
+        "$base_dir/wp/wp-config.php"
+        "$(dirname "$base_dir")/wp-config.php"
+    )
+
+    for cand in "${candidates[@]}"; do
+        if [ -f "$cand" ]; then
+            echo "$cand"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Erstellt einen sauberen Namensvorschlag für das Projekt anhand URL / Blogname / Ordnername
 function suggest_project_name_from_wp() {
     local wp_dir="$1"
@@ -634,7 +1402,13 @@ function write_project_env_file() {
     local r_dir="${17}"
     local r_key="${18}"
     local healthcheck_url="${19:-}"
-    shift 19
+    local ret_mode="${20:-staffel}"
+    local k_daily="${21:-30}"
+    local k_weekly="${22:-90}"
+    local k_monthly="${23:-365}"
+    local k_min="${24:-3}"
+    local ret_remote="${25:-yes}"
+    shift 25 2>/dev/null || shift $#
     local dbs=("$@")
 
     local count=${#dbs[@]}
@@ -691,6 +1465,15 @@ RSYNC_USER='$r_user'
 RSYNC_DIRECTORY='$r_dir'
 RSYNC_KEY='$r_key'
 
+# Aufbewahrungsregeln (Retention / Großvater-Vater-Sohn)
+RETENTION_MODE='$ret_mode'
+KEEP_DAILY_DAYS=$k_daily
+KEEP_WEEKLY_DAYS=$k_weekly
+KEEP_MONTHLY_DAYS=$k_monthly
+KEEP_MIN_SETS=$k_min
+RETENTION_REMOTE='$ret_remote'
+
+# Veraltet (wird bei fehlendem RETENTION_MODE als Fallback 'tage' genutzt):
 BACKUP_LIVE_TIME='$b_live_time'
 DELETE_IF_TRANSMITTED='$del_transmitted'
 
@@ -856,11 +1639,8 @@ function scan_and_setup_wordpress_sites() {
         read -rp "Standard-Umfang - alles/db/dateien [alles]: " default_scope
         default_scope=${default_scope:-alles}
 
-        read -rp "Backup-Lebenszeit in Tagen (0 = unendlich) [0]: " backup_live_time
-        backup_live_time=${backup_live_time:-0}
-
         local target_env_file="$basename/.env.$project_name"
-        write_project_env_file "$target_env_file" "$project_name" "$basis_name" "$default_scope" "$source_files_dir" "$source_files_dir_ignore_literal" "$backup_live_time" "false" "" "" "" "" "" "/usr/bin/ssh" "" "" "" "" "" "$db_host" "$db_name" "$db_user" "$db_pass"
+        write_project_env_file "$target_env_file" "$project_name" "$basis_name" "$default_scope" "$source_files_dir" "$source_files_dir_ignore_literal" "0" "false" "" "" "" "" "" "/usr/bin/ssh" "" "" "" "" "" "" "staffel" "30" "90" "365" "3" "yes" "$db_host" "$db_name" "$db_user" "$db_pass"
 
         echo "-> Projekt '$project_name' erfolgreich als $target_env_file gespeichert."
         created_count=$((created_count + 1))
@@ -1106,8 +1886,36 @@ function run_setup_assistant() {
     fi
 
     echo
-    read -rp "Backup-Lebenszeit in Tagen (0 = unendlich) [0]: " backup_live_time
-    backup_live_time=${backup_live_time:-0}
+    echo
+    echo "--- Aufbewahrungsregeln (Retention / Großvater-Vater-Sohn) ---"
+    read -rp "Aufbewahrungsmodus (staffel/tage/aus) [staffel]: " input_retention_mode
+    local retention_mode="${input_retention_mode:-staffel}"
+    local keep_daily_days=30
+    local keep_weekly_days=90
+    local keep_monthly_days=365
+    local keep_min_sets=3
+    local retention_remote="yes"
+    local backup_live_time=0
+
+    if [ "$retention_mode" = "staffel" ]; then
+        read -rp "Tägliche Backups behalten (Tage) [30]: " input_k_daily
+        keep_daily_days="${input_k_daily:-30}"
+        read -rp "Wöchentliche Backups danach behalten (bis Tag) [90]: " input_k_weekly
+        keep_weekly_days="${input_k_weekly:-90}"
+        read -rp "Monatliche Backups danach behalten (bis Tag, 0=unbegrenzt) [365]: " input_k_monthly
+        keep_monthly_days="${input_k_monthly:-365}"
+        read -rp "Mindestanzahl geschützter Backup-Sätze [3]: " input_k_min
+        keep_min_sets="${input_k_min:-3}"
+        read -rp "Aufbewahrungsregel auch auf dem Fernziel anwenden? (yes/no) [yes]: " input_ret_remote
+        retention_remote="${input_ret_remote:-yes}"
+    elif [ "$retention_mode" = "tage" ]; then
+        read -rp "Backup-Lebenszeit in Tagen (0 = unendlich) [30]: " input_live_time
+        backup_live_time="${input_live_time:-30}"
+        keep_daily_days="$backup_live_time"
+        read -rp "Aufbewahrungsregel auch auf dem Fernziel anwenden? (yes/no) [yes]: " input_ret_remote
+        retention_remote="${input_ret_remote:-yes}"
+    fi
+
     read -rp "Lokale Backup-Dateien nach erfolgreicher Übertragung löschen? (true/false) [false]: " delete_if_transmitted
     delete_if_transmitted=${delete_if_transmitted:-false}
 
@@ -1124,7 +1932,7 @@ function run_setup_assistant() {
         db_args+=("${db_hosts[$i]}" "${db_names[$i]}" "${db_users[$i]}" "${db_passwords[$i]}")
     done
 
-    write_project_env_file "$target_env_file" "$project_name" "$projekt_basis_dateiname" "$default_scope" "$source_files_dir" "$source_files_dir_ignore_literal" "$backup_live_time" "$delete_if_transmitted" "$sftp_host" "$sftp_port" "$sftp_user" "$sftp_key" "$sftp_directory" "$sftp_path_to_ssh_binary" "$rsync_host" "$rsync_user" "$rsync_directory" "$rsync_key" "$healthcheck_url" "${db_args[@]}"
+    write_project_env_file "$target_env_file" "$project_name" "$projekt_basis_dateiname" "$default_scope" "$source_files_dir" "$source_files_dir_ignore_literal" "$backup_live_time" "$delete_if_transmitted" "$sftp_host" "$sftp_port" "$sftp_user" "$sftp_key" "$sftp_directory" "$sftp_path_to_ssh_binary" "$rsync_host" "$rsync_user" "$rsync_directory" "$rsync_key" "$healthcheck_url" "$retention_mode" "$keep_daily_days" "$keep_weekly_days" "$keep_monthly_days" "$keep_min_sets" "$retention_remote" "${db_args[@]}"
 
     echo
     echo "======================================"
@@ -1669,16 +2477,16 @@ function run_pre_backup_checks() {
             local n_var="DB_${chk_i}_NAME"
             local u_var="DB_${chk_i}_USER"
             local p_var="DB_${chk_i}_PASSWORD"
-            check_db_hosts+=("${!h_var}")
-            check_db_names+=("${!n_var}")
-            check_db_users+=("${!u_var}")
-            check_db_passwords+=("${!p_var}")
+            check_db_hosts+=("${!h_var:-}")
+            check_db_names+=("${!n_var:-}")
+            check_db_users+=("${!u_var:-}")
+            check_db_passwords+=("${!p_var:-}")
         done
-    elif [ -n "$DB_NAME" ]; then
+    elif [ -n "${DB_NAME:-}" ]; then
         check_db_hosts+=("${DB_HOST:-localhost}")
-        check_db_names+=("$DB_NAME")
-        check_db_users+=("$DB_USER")
-        check_db_passwords+=("$DB_PASSWORD")
+        check_db_names+=("${DB_NAME:-}")
+        check_db_users+=("${DB_USER:-}")
+        check_db_passwords+=("${DB_PASSWORD:-}")
     fi
 
     if [ "${#check_db_names[@]}" -gt 0 ] && command -v mysql >/dev/null 2>&1; then
@@ -1690,11 +2498,11 @@ function run_pre_backup_checks() {
 
             local cur_h_clean="${cur_h%%:*}"
             local cur_port="${cur_h#*:}"
-            local cur_port_arg=()
-            [ "$cur_port" != "$cur_h" ] && [ -n "$cur_port" ] && cur_port_arg=("-P$cur_port")
+            local cur_port_arg=""
+            [ "$cur_port" != "$cur_h" ] && [ -n "$cur_port" ] && cur_port_arg="-P$cur_port"
 
             local tbl_count
-            tbl_count=$(MYSQL_PWD="$cur_p" mysql -h"$cur_h_clean" "${cur_port_arg[@]}" -u"$cur_u" "$cur_n" --connect-timeout=3 -s -N -e "SELECT count(*) FROM information_schema.tables WHERE table_schema = '$cur_n';" 2>/dev/null)
+            tbl_count=$(MYSQL_PWD="$cur_p" mysql -h"$cur_h_clean" $cur_port_arg -u"$cur_u" "$cur_n" --connect-timeout=3 -s -N -e "SELECT count(*) FROM information_schema.tables WHERE table_schema = '$cur_n';" 2>/dev/null)
             local mysql_ping_status=$?
 
             if [ "$mysql_ping_status" -eq 0 ] && [ -n "$tbl_count" ]; then
@@ -1768,6 +2576,286 @@ function prompt_scope_choice() {
     esac
 }
 
+# Konvertiert eine bestehende Projektkonfiguration auf das Staffel-Prinzip (mit automatischer .bak Sicherung)
+function convert_project_env_to_staffel() {
+    local env_f="$1"
+    [ -f "$env_f" ] || return 1
+
+    local bak_f="${env_f}.bak"
+    cp -p "$env_f" "$bak_f"
+
+    local PROJEKT_BASIS_DATEINAME=""
+    local RETENTION_MODE=""
+    local KEEP_DAILY_DAYS=""
+    local KEEP_WEEKLY_DAYS=""
+    local KEEP_MONTHLY_DAYS=""
+    local KEEP_MIN_SETS=""
+    local RETENTION_REMOTE=""
+    local BACKUP_LIVE_TIME=""
+
+    # shellcheck source=/dev/null
+    source "$env_f"
+
+    local current_k_daily="${KEEP_DAILY_DAYS:-${BACKUP_LIVE_TIME:-30}}"
+    [ "$current_k_daily" -eq 0 ] 2>/dev/null && current_k_daily=30
+    local current_k_weekly="${KEEP_WEEKLY_DAYS:-90}"
+    local current_k_monthly="${KEEP_MONTHLY_DAYS:-365}"
+    local current_k_min="${KEEP_MIN_SETS:-3}"
+    local current_ret_remote="${RETENTION_REMOTE:-yes}"
+
+    local tmp_f="${env_f}.tmp.$$"
+    grep -vE "^(RETENTION_MODE|KEEP_DAILY_DAYS|KEEP_WEEKLY_DAYS|KEEP_MONTHLY_DAYS|KEEP_MIN_SETS|RETENTION_REMOTE)=" "$env_f" > "$tmp_f" || true
+
+    cat >> "$tmp_f" <<EOF
+
+# Aufbewahrungsregeln (Retention / Großvater-Vater-Sohn)
+RETENTION_MODE='staffel'
+KEEP_DAILY_DAYS=$current_k_daily
+KEEP_WEEKLY_DAYS=$current_k_weekly
+KEEP_MONTHLY_DAYS=$current_k_monthly
+KEEP_MIN_SETS=$current_k_min
+RETENTION_REMOTE='$current_ret_remote'
+EOF
+
+    mv "$tmp_f" "$env_f"
+    chmod 600 "$env_f" 2>/dev/null || true
+    return 0
+}
+
+# Zeigt eine tabellarische Vorschau (Dry-Run) der lokalen und entfernten Backup-Sätze eines Projekts an
+function show_retention_dry_run() {
+    local p_env="$1"
+    [ -f "$p_env" ] || return 1
+
+    local p_name
+    p_name="$(project_name_from_env_file "$p_env")"
+
+    local PROJEKT_BASIS_DATEINAME=""
+    local RETENTION_MODE=""
+    local BACKUP_LIVE_TIME=""
+    local KEEP_DAILY_DAYS=""
+    local KEEP_WEEKLY_DAYS=""
+    local KEEP_MONTHLY_DAYS=""
+    local KEEP_MIN_SETS=""
+    local RETENTION_REMOTE="yes"
+    local SOURCE_FILES_DIR=""
+    local DB_COUNT=""
+    local DB_NAME=""
+    local DB2_NAME=""
+
+    # shellcheck source=/dev/null
+    source "$p_env"
+
+    local p_env_dir
+    p_env_dir="$(cd "$(dirname "$p_env")" && pwd)"
+    local p_basis="${PROJEKT_BASIS_DATEINAME:-$p_name}"
+    local backup_dir="$p_env_dir/$p_basis/"
+
+    local ret_mode="${RETENTION_MODE:-}"
+    if [ -z "$ret_mode" ]; then
+        if [ -n "$BACKUP_LIVE_TIME" ] && [ "$BACKUP_LIVE_TIME" -gt 0 ] 2>/dev/null; then
+            ret_mode="tage"
+        else
+            ret_mode="aus"
+        fi
+    fi
+
+    local daily_days="${KEEP_DAILY_DAYS:-${BACKUP_LIVE_TIME:-30}}"
+    local weekly_days="${KEEP_WEEKLY_DAYS:-90}"
+    local monthly_days="${KEEP_MONTHLY_DAYS:-365}"
+    local min_sets="${KEEP_MIN_SETS:-3}"
+
+    local expect_files="false"
+    [ -n "$SOURCE_FILES_DIR" ] && expect_files="true"
+
+    local exp_dbs=()
+    if [ -n "$DB_COUNT" ] && [ "$DB_COUNT" -gt 0 ] 2>/dev/null; then
+        local d_i
+        for ((d_i=1; d_i<=DB_COUNT; d_i++)); do
+            local d_var="DB_${d_i}_NAME"
+            [ -n "${!d_var:-}" ] && exp_dbs+=("${!d_var}")
+        done
+    else
+        [ -n "$DB_NAME" ] && exp_dbs+=("$DB_NAME")
+        [ -n "$DB2_NAME" ] && exp_dbs+=("$DB2_NAME")
+    fi
+
+    echo "========================================================================================================================"
+    echo "Aufbewahrungs-Vorschau (Dry-Run) für Projekt '$p_name' (Basis: $p_basis | Modus: $ret_mode)"
+    echo "Regeln: Täglich=$daily_days Tage | Wöchentlich=$weekly_days Tage | Monatlich=$monthly_days Tage | Mindestbestand=$min_sets Sätze"
+    echo "========================================================================================================================"
+
+    printf "%-8s | %-19s | %-18s | %-7s | %-10s | %-14s | %-12s | %s\n" "Ort" "Zeitstempel" "Umfang" "Dateien" "Größe" "Status" "Entscheidung" "Grund"
+    echo "---------+---------------------+--------------------+---------+------------+----------------+--------------+----------------"
+
+    local local_found=0
+    local local_kept=0
+    local local_del=0
+    local local_freed=0
+
+    # 1. Lokale Sätze
+    if [ -d "$backup_dir" ]; then
+        RAW_FILES=()
+        RAW_SIZES=()
+        local f
+        for f in "$backup_dir"*; do
+            [ -f "$f" ] || continue
+            local fname
+            fname="$(basename "$f")"
+            if parse_backup_filename "$fname" "$p_basis"; then
+                RAW_FILES+=("$fname")
+                RAW_SIZES+=("$(get_file_size_bytes "$f")")
+            fi
+        done
+
+        if [ "${#RAW_FILES[@]}" -gt 0 ]; then
+            local_found=1
+            group_backup_sets "$p_basis" "$expect_files" "${exp_dbs[@]}"
+            evaluate_retention_sets "$ret_mode" "$daily_days" "$weekly_days" "$monthly_days" "$min_sets"
+
+            local s_idx
+            for ((s_idx=0; s_idx<${#SET_TIMESTAMPS[@]}; s_idx++)); do
+                local ts="${SET_TIMESTAMPS[$s_idx]}"
+                local dec="${SET_DECISIONS[$s_idx]}"
+                local rsn="${SET_REASONS[$s_idx]}"
+                local s_bytes="${SET_BYTES[$s_idx]}"
+                local s_fcount="${SET_FILES_COUNT[$s_idx]}"
+                local s_desc="${SET_SCOPE_DESC[$s_idx]}"
+                local s_comp="${SET_IS_COMPLETE[$s_idx]}"
+                local comp_str="vollständig"
+                [ "$s_comp" != "1" ] && comp_str="unvollständig"
+
+                local color="${CLR_GREEN}"
+                [ "$dec" = "LOESCHEN" ] && color="${CLR_YELLOW}"
+
+                printf "%-8s | %-19s | %-18s | %-7s | %-10s | %-14s | %b%-12s%b | %s\n" \
+                    "lokal" "$ts" "${s_desc:0:18}" "$s_fcount" "$(format_bytes_human "$s_bytes")" "$comp_str" \
+                    "$color" "$dec" "$CLR_RESET" "$rsn"
+
+                if [ "$dec" = "BEHALTEN" ]; then
+                    local_kept=$((local_kept + 1))
+                else
+                    local_del=$((local_del + 1))
+                    local_freed=$((local_freed + s_bytes))
+                fi
+            done
+        fi
+    fi
+
+    if [ "$local_found" -eq 0 ]; then
+        printf "%-8s | %-19s | %-18s | %-7s | %-10s | %-14s | %-12s | %s\n" "lokal" "-" "keine Backups" "0" "0 B" "-" "-" "-"
+    fi
+
+    # 2. Remote Sätze (wenn konfiguriert)
+    local remote_found=0
+    local remote_kept=0
+    local remote_del=0
+    local remote_freed=0
+
+    if [ "$RETENTION_REMOTE" != "no" ] && [ "$RETENTION_REMOTE" != "false" ]; then
+        apply_retention_remote "$p_env" "true" "/dev/null" "false"
+        remote_kept="$RETENTION_REMOTE_KEPT"
+        remote_del="$RETENTION_REMOTE_DELETED"
+        remote_freed="$RETENTION_REMOTE_FREED_BYTES"
+
+        if [ -n "$RETENTION_REMOTE_ERROR" ]; then
+            printf "%-8s | %-19s | %-18s | %-7s | %-10s | %-14s | %b%-12s%b | %s\n" "remote" "FEHLER" "$RETENTION_REMOTE_ERROR" "-" "-" "-" "${CLR_RED}" "FEHLER" "$CLR_RESET" "-"
+        elif [ "${#SET_TIMESTAMPS[@]}" -gt 0 ]; then
+            remote_found=1
+            local s_idx
+            for ((s_idx=0; s_idx<${#SET_TIMESTAMPS[@]}; s_idx++)); do
+                local ts="${SET_TIMESTAMPS[$s_idx]}"
+                local dec="${SET_DECISIONS[$s_idx]}"
+                local rsn="${SET_REASONS[$s_idx]}"
+                local s_bytes="${SET_BYTES[$s_idx]}"
+                local s_fcount="${SET_FILES_COUNT[$s_idx]}"
+                local s_desc="${SET_SCOPE_DESC[$s_idx]}"
+                local s_comp="${SET_IS_COMPLETE[$s_idx]}"
+                local comp_str="vollständig"
+                [ "$s_comp" != "1" ] && comp_str="unvollständig"
+
+                local color="${CLR_GREEN}"
+                [ "$dec" = "LOESCHEN" ] && color="${CLR_YELLOW}"
+
+                printf "%-8s | %-19s | %-18s | %-7s | %-10s | %-14s | %b%-12s%b | %s\n" \
+                    "remote" "$ts" "${s_desc:0:18}" "$s_fcount" "$(format_bytes_human "$s_bytes")" "$comp_str" \
+                    "$color" "$dec" "$CLR_RESET" "$rsn"
+            done
+        fi
+    fi
+
+    echo "------------------------------------------------------------------------------------------------------------------------"
+    echo "Zusammenfassung lokal:  $local_kept Sätze behalten, $local_del Sätze zu löschen ($(format_bytes_human "$local_freed") freizugeben)"
+    if [ "$RETENTION_REMOTE" != "no" ] && [ "$RETENTION_REMOTE" != "false" ] && [ -z "$RETENTION_REMOTE_ERROR" ] && [ "$remote_found" -eq 1 ]; then
+        echo "Zusammenfassung remote: $remote_kept Sätze behalten, $remote_del Sätze zu löschen ($(format_bytes_human "$remote_freed") freizugeben)"
+    elif [ -n "$RETENTION_REMOTE_ERROR" ]; then
+        echo "Zusammenfassung remote: Nicht verfügbar ($RETENTION_REMOTE_ERROR)"
+    fi
+    echo "========================================================================================================================"
+    echo
+}
+
+# Menüfunktion zur Prüfung und Umstellung der Aufbewahrungsregeln
+function manage_project_retention() {
+    refresh_env_files
+    if [ "${#env_files[@]}" -eq 0 ]; then
+        echo "Keine Projekte vorhanden." >&2
+        return 0
+    fi
+
+    echo "======================================"
+    echo "Aufbewahrung prüfen / einstellen (Staffel/GVS)"
+    echo "======================================"
+    local sel_env=""
+    if [ "${#env_files[@]}" -eq 1 ]; then
+        sel_env="${env_files[0]}"
+    else
+        echo "Für welches Projekt soll die Aufbewahrung geprüft/eingestellt werden?"
+        local r_idx=1
+        local ef
+        for ef in "${env_files[@]}"; do
+            echo "  $r_idx) $(project_name_from_env_file "$ef")"
+            r_idx=$((r_idx + 1))
+        done
+        echo "  a) alle Projekte"
+        echo "  0) Zurück"
+        echo "======================================"
+        read -rp "Auswahl: " r_choice
+        if [ "$r_choice" = "0" ]; then
+            return 0
+        elif [ "$r_choice" = "a" ]; then
+            for ef in "${env_files[@]}"; do
+                show_retention_dry_run "$ef"
+            done
+            echo
+            read -rp "Möchten Sie alle Projekte auf das Großvater-Vater-Sohn-Prinzip ('staffel') umstellen? (j/N): " conv_all
+            if [[ "$conv_all" =~ ^[jJyY]$ ]]; then
+                for ef in "${env_files[@]}"; do
+                    convert_project_env_to_staffel "$ef"
+                    echo "-> $(project_name_from_env_file "$ef"): erfolgreich auf 'staffel' umgestellt (Backup: ${ef}.bak)"
+                done
+            fi
+            return 0
+        elif [ -n "$r_choice" ] && [ "$r_choice" -ge 1 ] 2>/dev/null && [ "$r_choice" -le "${#env_files[@]}" ] 2>/dev/null; then
+            sel_env="${env_files[$((r_choice - 1))]}"
+        else
+            echo "Ungültige Auswahl." >&2
+            return 0
+        fi
+    fi
+
+    if [ -n "$sel_env" ]; then
+        show_retention_dry_run "$sel_env"
+        local p_name
+        p_name="$(project_name_from_env_file "$sel_env")"
+        read -rp "Möchten Sie das Projekt '$p_name' auf das Großvater-Vater-Sohn-Prinzip ('staffel') umstellen? (j/N): " conv_one
+        if [[ "$conv_one" =~ ^[jJyY]$ ]]; then
+            convert_project_env_to_staffel "$sel_env"
+            echo "-> Projekt '$p_name' erfolgreich auf 'staffel' umgestellt (Sicherungskopie in ${sel_env}.bak erstellt)."
+        fi
+    fi
+}
+
 # Interaktives Hauptmenü, das beim Aufruf ohne Parameter angezeigt wird
 # Setzt bei Bedarf cli_project/cli_scope/restore_mode und kehrt zurück, damit der übrige
 # Skript-Ablauf unverändert weiterläuft, oder führt reine Info-Aktionen direkt aus.
@@ -1785,6 +2873,7 @@ function run_main_menu() {
         echo "  6) Datenbank wiederherstellen"
         echo "  7) Projekt-Datengröße anzeigen"
         echo "  8) Projektübersicht anzeigen"
+        echo "  9) Aufbewahrung prüfen / einstellen (Staffel/GVS)"
         echo "  0) Beenden"
         echo "======================================"
         read -rp "Auswahl: " menu_choice
@@ -1849,6 +2938,9 @@ function run_main_menu() {
             8)
                 show_project_overview
                 ;;
+            9)
+                manage_project_retention
+                ;;
             0)
                 echo "Beendet."
                 exit 0
@@ -1859,187 +2951,6 @@ function run_main_menu() {
         esac
     done
 }
-
-# Direkter Aufruf via --scan-wp CLI-Parameter
-if [ "$cli_scan_wp" == "true" ]; then
-    scan_and_setup_wordpress_sites "$cli_scan_wp_path"
-    exit $?
-fi
-
-# Kein Projekt vorhanden -> Setup-Assistent für ein neues Projekt starten
-if [ "${#env_files[@]}" -eq 0 ]; then
-    if [ -n "$cli_project" ] && [ "$cli_project" != "alle" ]; then
-        echo "======================================"
-        echo "Projekt '$cli_project' existiert noch nicht - Setup-Assistent wird gestartet ..."
-        echo "======================================"
-        echo
-        run_setup_assistant "$cli_project"
-        refresh_env_files
-    else
-        echo "======================================"
-        echo "Willkommen beim Backup-Skript!"
-        echo "Keine Projekt-Konfiguration (.env.<projektname>) gefunden."
-        echo "======================================"
-        echo "Wie möchten Sie beginnen?"
-        echo "  1) Nach vorhandenen WordPress-Installationen suchen & automatisch einrichten (empfohlen)"
-        echo "  2) Manuell ein neues Projekt einrichten"
-        echo
-        read -rp "Auswahl [1]: " initial_setup_choice
-        initial_setup_choice=${initial_setup_choice:-1}
-
-        if [ "$initial_setup_choice" == "1" ]; then
-            scan_and_setup_wordpress_sites
-            refresh_env_files
-            if [ "${#env_files[@]}" -eq 0 ]; then
-                echo "Es wurde kein Projekt angelegt. Starte manuellen Setup-Assistenten ..."
-                read -rp "Name für das neue Projekt (wird für Dateinamen verwendet, z.B. 'kundeA'): " new_project_name
-                new_project_name=${new_project_name// /_}
-                new_project_name=${new_project_name:-projekt1}
-                run_setup_assistant "$new_project_name"
-                refresh_env_files
-            fi
-        else
-            read -rp "Name für das neue Projekt (wird für Dateinamen verwendet, z.B. 'kundeA'): " new_project_name
-            new_project_name=${new_project_name// /_}
-            new_project_name=${new_project_name:-projekt1}
-            run_setup_assistant "$new_project_name"
-            refresh_env_files
-        fi
-    fi
-fi
-
-# Interaktives Hauptmenü anzeigen, wenn das Skript ohne Parameter aufgerufen wird
-# (z.B. manueller Aufruf im Terminal). Bei Aufrufen mit Parametern (z.B. per Cron)
-# wird das Menü übersprungen und wie bisher direkt mit den Parametern gearbeitet.
-if [ $# -eq 0 ] && [ -t 0 ]; then
-    run_main_menu
-fi
-
-# Restore-Modus (--restore): statt eines Backups wird eine Datenbank wiederhergestellt
-if [ "$restore_mode" == "true" ]; then
-    if [ "$cli_project" == "alle" ]; then
-        echo "Restore kann nur für ein einzelnes Projekt durchgeführt werden. Bitte --project=<name> verwenden." >&2
-        exit 1
-    fi
-
-    restore_target_env_file=''
-    if [ -n "$cli_project" ]; then
-        match_env_file="$basename/.env.$cli_project"
-        if [ "$cli_project" == "default" ] && [ -f "$legacy_env_file" ]; then
-            restore_target_env_file="$legacy_env_file"
-        elif [ -f "$match_env_file" ]; then
-            restore_target_env_file="$match_env_file"
-        else
-            echo "Kein Projekt '$cli_project' gefunden." >&2
-            exit 1
-        fi
-    elif [ "${#env_files[@]}" -eq 1 ]; then
-        restore_target_env_file="${env_files[0]}"
-    else
-        echo "======================================"
-        echo "Für welches Projekt soll eine Datenbank wiederhergestellt werden?"
-        project_index=1
-        for existing_env_file in "${env_files[@]}"; do
-            echo "  $project_index) $(project_name_from_env_file "$existing_env_file")"
-            project_index=$((project_index + 1))
-        done
-        echo "======================================"
-        read -rp "Projekt auswählen (Nummer): " project_choice
-        selected_index=$((project_choice - 1))
-        restore_target_env_file="${env_files[$selected_index]}"
-    fi
-
-    run_restore_for_project "$restore_target_env_file"
-    exit $?
-fi
-
-# Check-Modus (--check / --pre-check): Pre-Checks & Sicherheitsstatus für Projekt(e) ausführen
-if [ "$check_mode" == "true" ]; then
-    if [ "$cli_project" == "alle" ]; then
-        for chk_env in "${env_files[@]}"; do
-            run_pre_backup_checks "$chk_env"
-        done
-    else
-        chk_target_env=''
-        if [ -n "$cli_project" ]; then
-            match_env_file="$basename/.env.$cli_project"
-            if [ "$cli_project" == "default" ] && [ -f "$legacy_env_file" ]; then
-                chk_target_env="$legacy_env_file"
-            elif [ -f "$match_env_file" ]; then
-                chk_target_env="$match_env_file"
-            else
-                echo "Kein Projekt '$cli_project' gefunden." >&2
-                exit 1
-            fi
-        elif [ "${#env_files[@]}" -eq 1 ]; then
-            chk_target_env="${env_files[0]}"
-        else
-            echo "======================================"
-            echo "Für welches Projekt sollen Pre-Checks durchgeführt werden?"
-            project_index=1
-            for existing_env_file in "${env_files[@]}"; do
-                echo "  $project_index) $(project_name_from_env_file "$existing_env_file")"
-                project_index=$((project_index + 1))
-            done
-            echo "  a) alle Projekte"
-            echo "======================================"
-            read -rp "Projekt auswählen (Nummer oder 'a' für alle): " chk_choice
-            if [ "$chk_choice" == "a" ]; then
-                for existing_env_file in "${env_files[@]}"; do
-                    run_pre_backup_checks "$existing_env_file"
-                done
-                exit 0
-            else
-                selected_index=$((chk_choice - 1))
-                chk_target_env="${env_files[$selected_index]}"
-            fi
-        fi
-
-        [ -n "$chk_target_env" ] && run_pre_backup_checks "$chk_target_env"
-    fi
-    exit 0
-fi
-
-# Projekt(e) auswählen, die in diesem Lauf verarbeitet werden sollen
-selected_env_files=()
-if [ "$cli_project" == "alle" ]; then
-    selected_env_files=("${env_files[@]}")
-elif [ -n "$cli_project" ]; then
-    match_env_file="$basename/.env.$cli_project"
-    if [ "$cli_project" == "default" ] && [ -f "$legacy_env_file" ]; then
-        selected_env_files=("$legacy_env_file")
-    elif [ -f "$match_env_file" ]; then
-        selected_env_files=("$match_env_file")
-    else
-        echo "Kein Projekt '$cli_project' gefunden - Setup-Assistent dafür wird gestartet ..."
-        run_setup_assistant "$cli_project"
-        selected_env_files=("$match_env_file")
-    fi
-elif [ "${#env_files[@]}" -eq 1 ]; then
-    selected_env_files=("${env_files[@]}")
-else
-    echo "======================================"
-    echo "Mehrere Projekte gefunden:"
-    project_index=1
-    for existing_env_file in "${env_files[@]}"; do
-        echo "  $project_index) $(project_name_from_env_file "$existing_env_file")"
-        project_index=$((project_index + 1))
-    done
-    echo "  a) alle Projekte"
-    echo "======================================"
-    read -rp "Projekt auswählen (Nummer oder 'a' für alle): " project_choice
-    if [ "$project_choice" == "a" ]; then
-        selected_env_files=("${env_files[@]}")
-    else
-        selected_index=$((project_choice - 1))
-        selected_env_files=("${env_files[$selected_index]}")
-    fi
-fi
-
-################################
-################################
-################################
-## Funktionen für den eigentlichen Backup-Ablauf
 
 # Führt eine umfassende Selbstprüfung eines erzeugten Backups durch
 #  parameter1: Pfad zur Backup-Datei
@@ -2144,7 +3055,8 @@ function backup_db() {
     local db_name=$2
     local db_user=$3
     local db_password=$4
-    local db_dateiname="$backup_destiantion$projekt_basis_dateiname"'_'"$(date +%Y-%m-%d_%H-%M-%S)"'_'"$db_name"
+    local run_ts="${5:-${backup_run_timestamp:-$(date +%Y-%m-%d_%H-%M-%S)}}"
+    local db_dateiname="$backup_destiantion$projekt_basis_dateiname"'_'"$run_ts"'_'"$db_name"
     local sql_file="$db_dateiname$db_dateiendung"
 
     created_db_dump_file=""
@@ -2174,15 +3086,15 @@ function backup_db() {
 
         local db_host_clean="${db_host%%:*}"
         local db_port="${db_host#*:}"
-        local port_args=()
+        local port_arg=""
         if [ "$db_port" != "$db_host" ] && [ -n "$db_port" ]; then
-            port_args=("-P$db_port")
+            port_arg="-P$db_port"
         fi
 
         MYSQL_PWD="$db_password" mysqldump \
             "${mysqldump_opts[@]}" \
             -h"$db_host_clean" \
-            "${port_args[@]}" \
+            $port_arg \
             -u"$db_user" \
             "$db_name" > "$sql_file" 2>> "$log_file_name"
         local dump_status=$?
@@ -2239,6 +3151,8 @@ function run_backup_for_project() {
     local project_env_file="$1"
     local project_name
     project_name="$(project_name_from_env_file "$project_env_file")"
+
+    local backup_run_timestamp="${BACKUP_RUN_TIMESTAMP:-$(date +%Y-%m-%d_%H-%M-%S)}"
 
     local project_started_time
     project_started_time="$(date +"%Y-%m-%d %H:%M:%S")"
@@ -2300,10 +3214,10 @@ function run_backup_for_project() {
             name_var="DB_${db_read_i}_NAME"
             user_var="DB_${db_read_i}_USER"
             password_var="DB_${db_read_i}_PASSWORD"
-            db_hosts+=("${!host_var}")
-            db_names+=("${!name_var}")
-            db_users+=("${!user_var}")
-            db_passwords+=("${!password_var}")
+            db_hosts+=("${!host_var:-}")
+            db_names+=("${!name_var:-}")
+            db_users+=("${!user_var:-}")
+            db_passwords+=("${!password_var:-}")
         done
     else
         # Abwärtskompatibilität zu älteren .env-Dateien mit DB_*/DB2_*
@@ -2321,13 +3235,13 @@ function run_backup_for_project() {
         fi
     fi
 
-    source_files_dir="$SOURCE_FILES_DIR"
+    source_files_dir="${SOURCE_FILES_DIR:-}"
 
     # Auszuschließende Muster laden
     source_files_dir_ignore=()
     if declare -p SOURCE_FILES_DIR_IGNORE 2>/dev/null | grep -q '^declare -a'; then
         source_files_dir_ignore=("${SOURCE_FILES_DIR_IGNORE[@]}")
-    elif [ -n "$SOURCE_FILES_DIR_IGNORE" ]; then
+    elif [ -n "${SOURCE_FILES_DIR_IGNORE:-}" ]; then
         local raw_ignore="$SOURCE_FILES_DIR_IGNORE"
         raw_ignore="${raw_ignore#(}"
         raw_ignore="${raw_ignore%)}"
@@ -2341,24 +3255,24 @@ function run_backup_for_project() {
         done
     fi
 
-    sftp_host="$SFTP_HOST"
+    sftp_host="${SFTP_HOST:-}"
     sftp_port="${SFTP_PORT:-22}"
-    sftp_key="$SFTP_KEY"
-    sftp_user="$SFTP_USER"
-    sftp_directory="$SFTP_DIRECTORY"
+    sftp_key="${SFTP_KEY:-}"
+    sftp_user="${SFTP_USER:-}"
+    sftp_directory="${SFTP_DIRECTORY:-}"
     sftp_batchfile="$projekt_basis_dateiname"'_sftp_upload_batchfile'
     sftp_path_to_ssh_binary="${SFTP_PATH_TO_SSH_BINARY:-$(command -v ssh)}"
 
-    rysnc_host="$RSYNC_HOST"
-    rsync_user="$RSYNC_USER"
-    rsync_directory="$RSYNC_DIRECTORY"
-    rsync_key="$RSYNC_KEY"
+    rysnc_host="${RSYNC_HOST:-}"
+    rsync_user="${RSYNC_USER:-}"
+    rsync_directory="${RSYNC_DIRECTORY:-}"
+    rsync_key="${RSYNC_KEY:-}"
 
     backup_live_time="${BACKUP_LIVE_TIME:-0}"
     delete_if_transmitted="${DELETE_IF_TRANSMITTED:-false}"
 
-    status_email_address="$STATUS_EMAIL_ADDRESS"
-    alert_email_address="$ALERT_EMAIL_ADDRESS"
+    status_email_address="${STATUS_EMAIL_ADDRESS:-}"
+    alert_email_address="${ALERT_EMAIL_ADDRESS:-}"
     healthcheck_url="${HEALTHCHECK_URL:-}"
 
     # Backup Zielordner & Logs sicher anlegen (Webroot-Schutz für Apache 2.4/2.2)
@@ -2368,8 +3282,8 @@ function run_backup_for_project() {
     ensure_webroot_protection "$basename/status" "deny_all"
 
     # Dateien
-    dateien_dateiname="$backup_destiantion$projekt_basis_dateiname"'_'"$(date +%Y-%m-%d_%H-%M-%S)"'_'files
-    log_file_name="$basename/log/$projekt_basis_dateiname"'_'"$(date +%Y-%m-%d_%H-%M-%S)"'.log'
+    dateien_dateiname="$backup_destiantion$projekt_basis_dateiname"'_'"${backup_run_timestamp}"'_'files
+    log_file_name="$basename/log/$projekt_basis_dateiname"'_'"${backup_run_timestamp}"'.log'
     touch "$log_file_name"
     chmod 600 "$log_file_name" 2>/dev/null || true
 
@@ -2419,7 +3333,7 @@ function run_backup_for_project() {
             for ((db_backup_i=0; db_backup_i<${#db_names[@]}; db_backup_i++))
             do
                 local current_db_name="${db_names[$db_backup_i]}"
-                backup_db "${db_hosts[$db_backup_i]}" "$current_db_name" "${db_users[$db_backup_i]}" "${db_passwords[$db_backup_i]}"
+                backup_db "${db_hosts[$db_backup_i]}" "$current_db_name" "${db_users[$db_backup_i]}" "${db_passwords[$db_backup_i]}" "$backup_run_timestamp"
                 local db_backup_status=$?
 
                 if [ "$db_backup_status" -eq 2 ] || [ -z "$created_db_dump_file" ] || [ ! -f "$created_db_dump_file" ]; then
@@ -2653,18 +3567,59 @@ function run_backup_for_project() {
         echo
     fi
 
-    # Dateien, die älter als $backup_live_time Tage sind löschen
-    if [ -n "$backup_destiantion" ] && [ -d "$backup_destiantion" ] && [ "$backup_live_time" != "0" ] && [ "$backup_live_time" -gt 0 ] 2>/dev/null
-    then
-        echo "Dateien in $backup_destiantion älter als $backup_live_time Tage löschen ..." | tee -a "$log_file_name"
-        find "$backup_destiantion" -maxdepth 1 -type f ! -name '.htaccess' ! -name '*.sh' -mtime +"$backup_live_time" -delete -print | tee -a "$log_file_name"
-        echo "erledigt." | tee -a "$log_file_name"
+    # Aufbewahrungsregeln (Retention / Großvater-Vater-Sohn) ausführen
+    local ret_mode="${RETENTION_MODE:-}"
+    if [ -z "$ret_mode" ]; then
+        if [ -n "$BACKUP_LIVE_TIME" ] && [ "$BACKUP_LIVE_TIME" -gt 0 ] 2>/dev/null; then
+            ret_mode="tage"
+        else
+            ret_mode="aus"
+        fi
+    fi
+
+    if [ "$ret_mode" != "staffel" ]; then
+        echo "Hinweis: Aufbewahrungsmodus steht auf '$ret_mode'. Die Großvater-Vater-Sohn-Staffelung (RETENTION_MODE='staffel') ist verfügbar." | tee -a "$log_file_name"
         echo | tee -a "$log_file_name"
     fi
 
-    # Alte Logs bereinigen, wenn backup_live_time konfiguriert ist
-    if [ "$backup_live_time" != "0" ] && [ "$backup_live_time" -gt 0 ] 2>/dev/null; then
-        find "$basename/log" -maxdepth 1 -type f -name '*.log' -mtime +"$backup_live_time" -delete 2>/dev/null || true
+    local ret_lokal_behalten=0
+    local ret_lokal_geloescht=0
+    local ret_lokal_frei_bytes=0
+    local ret_remote_behalten=0
+    local ret_remote_geloescht=0
+    local ret_remote_frei_bytes=0
+    local ret_remote_fehler_json="null"
+
+    if [ "$project_exitcode" -ge 2 ] || [ "$project_status" == "fehler" ]; then
+        echo "Sicherheitshinweis: Backup-Lauf fehlerhaft (Exit-Code: $project_exitcode) - Aufbewahrungsbereinigung (Retention) wird aus Sicherheitsgründen übersprungen." | tee -a "$log_file_name"
+        echo | tee -a "$log_file_name"
+    else
+        # 1. Lokale Bereinigung (nur wenn DELETE_IF_TRANSMITTED nicht aktiv war)
+        if [ "$local_deleted" != "true" ]; then
+            echo "Aufbewahrungsbereinigung (Retention: Modus '$ret_mode') für lokale Backups ausführen ..." | tee -a "$log_file_name"
+            apply_retention_local "$project_env_file" "false" "$log_file_name" "true"
+            ret_lokal_behalten="$RETENTION_LOCAL_KEPT"
+            ret_lokal_geloescht="$RETENTION_LOCAL_DELETED"
+            ret_lokal_frei_bytes="$RETENTION_LOCAL_FREED_BYTES"
+            echo "Lokale Retention abgeschlossen: $ret_lokal_behalten behalten, $ret_lokal_geloescht gelöscht ($(format_bytes_human "$ret_lokal_frei_bytes") freigegeben)." | tee -a "$log_file_name"
+            echo | tee -a "$log_file_name"
+        fi
+
+        # 2. Remote Bereinigung (falls konfiguriert und RETENTION_REMOTE != 'no')
+        if [ -n "$sftp_host" ] || [ -n "$rysnc_host" ]; then
+            echo "Aufbewahrungsbereinigung (Retention: Modus '$ret_mode') für entfernte Backups ausführen ..." | tee -a "$log_file_name"
+            if ! apply_retention_remote "$project_env_file" "false" "$log_file_name" "true"; then
+                project_warnings+=("Remote-Aufbewahrungsbereinigung fehlgeschlagen: $RETENTION_REMOTE_ERROR")
+                [ "$project_exitcode" -lt 1 ] && project_exitcode=1
+                [ "$project_status" == "ok" ] && project_status="warnung"
+                [ -n "$RETENTION_REMOTE_ERROR" ] && ret_remote_fehler_json="\"$(json_escape "$RETENTION_REMOTE_ERROR")\""
+            fi
+            ret_remote_behalten="$RETENTION_REMOTE_KEPT"
+            ret_remote_geloescht="$RETENTION_REMOTE_DELETED"
+            ret_remote_frei_bytes="$RETENTION_REMOTE_FREED_BYTES"
+            echo "Remote Retention abgeschlossen: $ret_remote_behalten behalten, $ret_remote_geloescht gelöscht ($(format_bytes_human "$ret_remote_frei_bytes") freigegeben)." | tee -a "$log_file_name"
+            echo | tee -a "$log_file_name"
+        fi
     fi
 
     local project_ended_time
@@ -2701,9 +3656,9 @@ function run_backup_for_project() {
     dateien_json+="]"
 
     local warnungen_json
-    warnungen_json="$(json_string_array "${project_warnings[@]}")"
+    warnungen_json="$(json_string_array ${project_warnings[@]+"${project_warnings[@]}"})"
     local fehler_json
-    fehler_json="$(json_string_array "${project_errors[@]}")"
+    fehler_json="$(json_string_array ${project_errors[@]+"${project_errors[@]}"})"
 
     local uebertragen_methode_val="null"
     [ -n "$transmitted_method" ] && uebertragen_methode_val="\"$transmitted_method\""
@@ -2728,6 +3683,20 @@ function run_backup_for_project() {
     "methode": $uebertragen_methode_val,
     "ok": $uebertragen_ok_val
   },
+  "retention": {
+    "modus": "$ret_mode",
+    "lokal": {
+      "behalten": $ret_lokal_behalten,
+      "geloescht": $ret_lokal_geloescht,
+      "frei_bytes": $ret_lokal_frei_bytes
+    },
+    "remote": {
+      "behalten": $ret_remote_behalten,
+      "geloescht": $ret_remote_geloescht,
+      "frei_bytes": $ret_remote_frei_bytes,
+      "fehler": $ret_remote_fehler_json
+    }
+  },
   "lokal_geloescht": $lokal_geloescht_val,
   "warnungen": $warnungen_json,
   "fehler": $fehler_json,
@@ -2740,7 +3709,8 @@ EOF
 
     all_project_json_results+=("$current_project_json")
 
-    if [ "$project_exitcode" -gt "$overall_exitcode" ]; then
+    local cur_overall="${overall_exitcode:-0}"
+    if [ "$project_exitcode" -gt "$cur_overall" ]; then
         overall_exitcode="$project_exitcode"
     fi
 
@@ -2752,6 +3722,217 @@ EOF
     echo | tee -a "$log_file_name"
     return "$project_exitcode"
 }
+# Wenn das Skript nur zur Einbindung von Funktionen (z.B. in Testsuites) gesourct wird, hier stoppen
+if [ "$cli_source_only" == "true" ]; then
+    return 0 2>/dev/null || exit 0
+fi
+
+# Direkter Aufruf via --retention-dry-run CLI-Parameter
+if [ "$retention_dry_run" == "true" ]; then
+    refresh_env_files
+    if [ "${#env_files[@]}" -eq 0 ]; then
+        echo "Keine Projekt-Konfiguration (.env.<projektname>) gefunden." >&2
+        exit 1
+    fi
+    if [ "$cli_project" == "alle" ]; then
+        for env_f in "${env_files[@]}"; do
+            show_retention_dry_run "$env_f"
+        done
+    elif [ -n "$cli_project" ]; then
+        match_env_file="$basename/.env.$cli_project"
+        if [ "$cli_project" == "default" ] && [ -f "$legacy_env_file" ]; then
+            show_retention_dry_run "$legacy_env_file"
+        elif [ -f "$match_env_file" ]; then
+            show_retention_dry_run "$match_env_file"
+        else
+            echo "Kein Projekt '$cli_project' gefunden." >&2
+            exit 1
+        fi
+    elif [ "${#env_files[@]}" -eq 1 ]; then
+        show_retention_dry_run "${env_files[0]}"
+    else
+        for env_f in "${env_files[@]}"; do
+            show_retention_dry_run "$env_f"
+        done
+    fi
+    exit 0
+fi
+
+# Direkter Aufruf via --scan-wp CLI-Parameter
+if [ "$cli_scan_wp" == "true" ]; then
+    scan_and_setup_wordpress_sites "$cli_scan_wp_path"
+    exit $?
+fi
+
+# Kein Projekt vorhanden -> Setup-Assistent für ein neues Projekt starten
+if [ "${#env_files[@]}" -eq 0 ]; then
+    if [ -n "$cli_project" ] && [ "$cli_project" != "alle" ]; then
+        echo "======================================"
+        echo "Projekt '$cli_project' existiert noch nicht - Setup-Assistent wird gestartet ..."
+        echo "======================================"
+        echo
+        run_setup_assistant "$cli_project"
+        refresh_env_files
+    else
+        echo "======================================"
+        echo "Willkommen beim Backup-Skript!"
+        echo "Keine Projekt-Konfiguration (.env.<projektname>) gefunden."
+        echo "======================================"
+        echo "Wie möchten Sie beginnen?"
+        echo "  1) Nach vorhandenen WordPress-Installationen suchen & automatisch einrichten (empfohlen)"
+        echo "  2) Manuell ein neues Projekt einrichten"
+        echo
+        read -rp "Auswahl [1]: " initial_setup_choice
+        initial_setup_choice=${initial_setup_choice:-1}
+
+        if [ "$initial_setup_choice" == "1" ]; then
+            scan_and_setup_wordpress_sites
+            refresh_env_files
+            if [ "${#env_files[@]}" -eq 0 ]; then
+                echo "Es wurde kein Projekt angelegt. Starte manuellen Setup-Assistenten ..."
+                read -rp "Name für das neue Projekt (wird für Dateinamen verwendet, z.B. 'kundeA'): " new_project_name
+                new_project_name=${new_project_name// /_}
+                new_project_name=${new_project_name:-projekt1}
+                run_setup_assistant "$new_project_name"
+                refresh_env_files
+            fi
+        else
+            read -rp "Name für das neue Projekt (wird für Dateinamen verwendet, z.B. 'kundeA'): " new_project_name
+            new_project_name=${new_project_name// /_}
+            new_project_name=${new_project_name:-projekt1}
+            run_setup_assistant "$new_project_name"
+            refresh_env_files
+        fi
+    fi
+fi
+
+# Interaktives Hauptmenü anzeigen, wenn das Skript ohne Parameter aufgerufen wird
+# (z.B. manueller Aufruf im Terminal). Bei Aufrufen mit Parametern (z.B. per Cron)
+# wird das Menü übersprungen und wie bisher direkt mit den Parametern gearbeitet.
+if [ $# -eq 0 ] && [ -t 0 ]; then
+    run_main_menu
+fi
+
+# Restore-Modus (--restore): statt eines Backups wird eine Datenbank wiederhergestellt
+if [ "$restore_mode" == "true" ]; then
+    if [ "$cli_project" == "alle" ]; then
+        echo "Restore kann nur für ein einzelnes Projekt durchgeführt werden. Bitte --project=<name> verwenden." >&2
+        exit 1
+    fi
+
+    restore_target_env_file=''
+    if [ -n "$cli_project" ]; then
+        match_env_file="$basename/.env.$cli_project"
+        if [ "$cli_project" == "default" ] && [ -f "$legacy_env_file" ]; then
+            restore_target_env_file="$legacy_env_file"
+        elif [ -f "$match_env_file" ]; then
+            restore_target_env_file="$match_env_file"
+        else
+            echo "Kein Projekt '$cli_project' gefunden." >&2
+            exit 1
+        fi
+    elif [ "${#env_files[@]}" -eq 1 ]; then
+        restore_target_env_file="${env_files[0]}"
+    else
+        echo "======================================"
+        echo "Für welches Projekt soll eine Datenbank wiederhergestellt werden?"
+        project_index=1
+        for existing_env_file in "${env_files[@]}"; do
+            echo "  $project_index) $(project_name_from_env_file "$existing_env_file")"
+            project_index=$((project_index + 1))
+        done
+        echo "======================================"
+        read -rp "Projekt auswählen (Nummer): " project_choice
+        selected_index=$((project_choice - 1))
+        restore_target_env_file="${env_files[$selected_index]}"
+    fi
+
+    run_restore_for_project "$restore_target_env_file"
+    exit $?
+fi
+
+# Check-Modus (--check / --pre-check): Pre-Checks & Sicherheitsstatus für Projekt(e) ausführen
+if [ "$check_mode" == "true" ]; then
+    if [ "$cli_project" == "alle" ]; then
+        for chk_env in "${env_files[@]}"; do
+            run_pre_backup_checks "$chk_env"
+        done
+    else
+        chk_target_env=''
+        if [ -n "$cli_project" ]; then
+            match_env_file="$basename/.env.$cli_project"
+            if [ "$cli_project" == "default" ] && [ -f "$legacy_env_file" ]; then
+                chk_target_env="$legacy_env_file"
+            elif [ -f "$match_env_file" ]; then
+                chk_target_env="$match_env_file"
+            else
+                echo "Kein Projekt '$cli_project' gefunden." >&2
+                exit 1
+            fi
+        elif [ "${#env_files[@]}" -eq 1 ]; then
+            chk_target_env="${env_files[0]}"
+        else
+            echo "======================================"
+            echo "Für welches Projekt sollen Pre-Checks durchgeführt werden?"
+            project_index=1
+            for existing_env_file in "${env_files[@]}"; do
+                echo "  $project_index) $(project_name_from_env_file "$existing_env_file")"
+                project_index=$((project_index + 1))
+            done
+            echo "  a) alle Projekte"
+            echo "======================================"
+            read -rp "Projekt auswählen (Nummer oder 'a' für alle): " chk_choice
+            if [ "$chk_choice" == "a" ]; then
+                for existing_env_file in "${env_files[@]}"; do
+                    run_pre_backup_checks "$existing_env_file"
+                done
+                exit 0
+            else
+                selected_index=$((chk_choice - 1))
+                chk_target_env="${env_files[$selected_index]}"
+            fi
+        fi
+
+        [ -n "$chk_target_env" ] && run_pre_backup_checks "$chk_target_env"
+    fi
+    exit 0
+fi
+
+# Projekt(e) auswählen, die in diesem Lauf verarbeitet werden sollen
+selected_env_files=()
+if [ "$cli_project" == "alle" ]; then
+    selected_env_files=("${env_files[@]}")
+elif [ -n "$cli_project" ]; then
+    match_env_file="$basename/.env.$cli_project"
+    if [ "$cli_project" == "default" ] && [ -f "$legacy_env_file" ]; then
+        selected_env_files=("$legacy_env_file")
+    elif [ -f "$match_env_file" ]; then
+        selected_env_files=("$match_env_file")
+    else
+        echo "Kein Projekt '$cli_project' gefunden - Setup-Assistent dafür wird gestartet ..."
+        run_setup_assistant "$cli_project"
+        selected_env_files=("$match_env_file")
+    fi
+elif [ "${#env_files[@]}" -eq 1 ]; then
+    selected_env_files=("${env_files[@]}")
+else
+    echo "======================================"
+    echo "Mehrere Projekte gefunden:"
+    project_index=1
+    for existing_env_file in "${env_files[@]}"; do
+        echo "  $project_index) $(project_name_from_env_file "$existing_env_file")"
+        project_index=$((project_index + 1))
+    done
+    echo "  a) alle Projekte"
+    echo "======================================"
+    read -rp "Projekt auswählen (Nummer oder 'a' für alle): " project_choice
+    if [ "$project_choice" == "a" ]; then
+        selected_env_files=("${env_files[@]}")
+    else
+        selected_index=$((project_choice - 1))
+        selected_env_files=("${env_files[$selected_index]}")
+    fi
+fi
 
 ################################
 ################################

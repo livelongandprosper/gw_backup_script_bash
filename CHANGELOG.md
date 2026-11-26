@@ -7,6 +7,37 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
 
 ---
 
+## [2.3.0] - 2026-11-26
+
+### Hinzugefügt
+- **Intelligente Aufbewahrungsrichtlinie (Großvater-Vater-Sohn / Staffel-Prinzip):**
+  - Neuer Aufbewahrungsmodus `RETENTION_MODE='staffel'` in `.env.<projekt>` für abgestufte Vorhaltezeiten:
+    - `KEEP_DAILY_DAYS=30`: Tägliche Backups der letzten N Tage vollständig aufbewahren.
+    - `KEEP_WEEKLY_DAYS=90`: Danach bis N Tage genau das jüngste Backup je ISO-Kalenderwoche (`YYYY-Www`) behalten.
+    - `KEEP_MONTHLY_DAYS=365`: Danach bis N Tage genau das jüngste Backup je Kalendermonat (`YYYY-MM`) behalten (`0` = unbegrenzt).
+    - `KEEP_MIN_SETS=3`: Schutzgarantie für mindestens N jüngste erfolgreiche Sätze unabhängig vom Alter.
+    - `RETENTION_REMOTE='yes'`: Anwendung der Regeln auf das Remote-Ziel (SFTP / Rsync via SFTP-Batch).
+- **Atomare Satzbildung & Auswertung:**
+  - Einheitlicher Laufzeitstempel `BACKUP_RUN_TIMESTAMP` für alle Datenbank-Dumps und Datei-Archive eines Projektlaufs.
+  - Zeitstempel-Parser `parse_backup_filename` und Satzgruppierung `group_backup_sets` direkt aus Dateinamen (unabhängig von Dateisystem-`mtime`).
+  - Bereinigung unvollständiger Sätze älter als 7 Tage, wenn neuere vollständige Sätze existieren.
+- **Sicherheitsbarrieren:**
+  - Striktes Löschverbot lokal und remote bei fehlerhaftem Backup (`exitcode == 2`) oder fehlgeschlagener Verifikation (`verify_backup`).
+  - Schutz fremder Dateien (`.htaccess`, Skripte, andere Projekte) und Begrenzung auf das projekteigene Verzeichnis.
+  - Robuste SFTP-Fehlertoleranz: Remote-Löschfehler erzeugen Warnungen (Exitcode maximal 1) und gefährden niemals das erfolgreiche Backup.
+- **Vorschau-Modus (Dry-Run) & Hauptmenü:**
+  - CLI-Option `--retention-dry-run [--project=<name>|alle]` zur übersichtlichen tabellarischen Vorschau aller behaltenen/gelöschten Sätze und des freigegebenen Speichers ohne Dateisystemänderungen.
+  - Neuer Hauptmenüpunkt "Aufbewahrung prüfen / einstellen (Staffel/GVS)" mit interaktiver Vorschau und Konvertierungsfunktion bestehender Projekte nach `staffel` inkl. automatischer Sicherung als `.env.<projekt>.bak`.
+- **Status-JSON Erweiterung:**
+  - `status/<PROJEKT>.last.json` um den Schlüssel `retention` mit Modus, Behalte-/Löschzählern und Byte-Angaben für lokal und remote erweitert.
+- **Abwärtskompatibilität:**
+  - Bestehende Projekte ohne `RETENTION_MODE` fallen automatisch auf `tage` (wenn `BACKUP_LIVE_TIME > 0`) oder `aus` zurück; kein stilles Umstellen.
+  - Setup-Assistent schlägt für neue Projekte standardmäßig `staffel` mit empfohlenen Werten vor.
+- **Testsuite:**
+  - Synthetische Testsuite `test_retention_suite.sh` mit 8 Testfällen (400-Tage-Staffelung, Mindestbestand, unvollständige Sätze, Dateischutz, Abwärtskompatibilität, Konvertierung, Sicherheitsbarriere, SFTP-Fehlertoleranz).
+
+---
+
 ## [2.2.0] - 2026-11-25
 
 ### Hinzugefügt

@@ -190,7 +190,7 @@ Die Validierung erfolgt automatisiert und skriptgesteuert über eine dedizierte 
 
 # Delivery Steps
 
-### * Step 1: Kernlogik für Satzbildung und GVS-Retention-Algorithmus implementieren
+### ✓ Step 1: Kernlogik für Satzbildung und GVS-Retention-Algorithmus implementieren
 Ergebnis: Das Skript verfügt über robuste Hilfsfunktionen zur Extraktion von Zeitstempeln aus Dateinamen, zur Gruppierung von Backup-Sätzen und zur simulationsfreien Bestimmung der Behalteentscheidung nach dem Großvater-Vater-Sohn-Prinzip.
 
 - Zeitstempel-Parser implementieren (`parse_backup_filename`), der Basisname, Datum (`YYYY-MM-DD_HH-MM-SS`), Typ (`db` / `files`) und DB-Name isoliert.
@@ -200,7 +200,7 @@ Ergebnis: Das Skript verfügt über robuste Hilfsfunktionen zur Extraktion von Z
   - Berücksichtigung des Mindestbestands (`KEEP_MIN_SETS`), unvollständiger Sätze (> 7 Tage) und von `RETENTION_MODE` (`staffel`, `tage`, `aus`).
   - Rückgabe strukturierter Entscheidungslisten mit Status (`behalten`/`geloescht`), Grund (`taeglich`, `woechentlich`, `monatlich`, `minimum`, `unvollstaendig_alt`, `zu_alt`, `tage_abgelaufen`) und Speichergrößen.
 
-###   Step 2: Lokale und Remote-Bereinigung (SFTP/Rsync) mit Sicherheitsregeln umsetzen
+### ✓ Step 2: Lokale und Remote-Bereinigung (SFTP/Rsync) mit Sicherheitsregeln umsetzen
 Ergebnis: Lokale und entfernte Backup-Bestände werden nach Sicherheitsprüfung bereinigt; Remote-Löschungen laufen fehlerresistent über SFTP-Batch-Kommandos.
 
 - Lokale Retention-Ausführung (`apply_retention_local`) implementieren, die lokale Sätze prüft, protokoliert und gelöschte Dateien via `rm -f` entfernt.
@@ -213,7 +213,7 @@ Ergebnis: Lokale und entfernte Backup-Bestände werden nach Sicherheitsprüfung 
   - Schutz von `.htaccess`, Skripten, Fremddateien und anderen Projekten.
   - Strikte Begrenzung auf das konfigurierte Projekt-Zielverzeichnis.
 
-###   Step 3: Integration in Backup-Lifecycle, Status-JSON und Setup-Assistent
+### ✓ Step 3: Integration in Backup-Lifecycle, Status-JSON und Setup-Assistent
 Ergebnis: Der Backup-Lauf führt die Aufbewahrungsregeln nach erfolgreicher Verifikation und Übertragung aus, erfasst die Ergebnisse im Status-JSON, und der Setup-Assistent sowie das Hauptmenü unterstützen 'staffel'.
 
 - Retention-Aufruf in `run_backup_for_project` nach `verify_backup` und Übertragung einbinden (bei `DELETE_IF_TRANSMITTED=true` nur remote).
@@ -222,7 +222,7 @@ Ergebnis: Der Backup-Lauf führt die Aufbewahrungsregeln nach erfolgreicher Veri
 - Setup-Assistent (`run_setup_assistant`) und `write_project_env_file` um `RETENTION_MODE='staffel'`, `KEEP_DAILY_DAYS=30`, `KEEP_WEEKLY_DAYS=90`, `KEEP_MONTHLY_DAYS=365`, `KEEP_MIN_SETS=3`, `RETENTION_REMOTE='yes'` erweitern.
 - `.env.example` aktualisieren und Abwärtskompatibilität für bestehende `.env`-Dateien (`tage` bei `BACKUP_LIVE_TIME > 0`, sonst `aus`) garantieren.
 
-###   Step 4: Dry-Run, Hauptmenü-Steuerung, Tests und Dokumentation
+### * Step 4: Dry-Run, Hauptmenü-Steuerung, Tests und Dokumentation
 Ergebnis: Dry-Run-Funktionalität auf CLI- und Menüebene verfügbar, Migration bestehender Projekte möglich, Testsuite und Dokumentation vollständig.
 
 - CLI-Parameter `--retention-dry-run [--project=<name>|alle]` implementieren mit tabellarischer Ausgabe (Datum, Typ, Größe, Entscheidung, Grund, freiwerdender Speicherplatz lokal/remote).

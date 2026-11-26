@@ -36,6 +36,10 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
 - **Testsuite:**
   - Synthetische Testsuite `test_retention_suite.sh` mit 8 Testfällen (400-Tage-Staffelung, Mindestbestand, unvollständige Sätze, Dateischutz, Abwärtskompatibilität, Konvertierung, Sicherheitsbarriere, SFTP-Fehlertoleranz).
 
+### Entfernt
+- **Veraltetes Hilfsskript `backup_sync_proxy_[projectname].sh`:**
+  - Entfernung des nicht mehr benötigten Proxy-Sync-Skripts, da Remote-Übertragung und Bereinigung direkt und nativ über SFTP/Rsync im Hauptskript abgebildet werden.
+
 ---
 
 ## [2.2.0] - 2026-11-25

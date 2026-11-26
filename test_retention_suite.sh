@@ -282,6 +282,7 @@ echo "OK"
 echo -n "[Test 7] Sicherheitsbarriere bei Backup-Fehlschlag ... "
 T7_DIR="$TEST_TMP/t7_project"
 mkdir -p "$T7_DIR/proj7" "$T7_DIR/log" "$T7_DIR/status" "$T7_DIR/source"
+cp "$MAIN_SCRIPT" "$T7_DIR/backup_full_db_files_zip.sh"
 echo "test data" > "$T7_DIR/source/test.txt"
 
 cat << EOF > "$T7_DIR/.env.proj7"
@@ -306,7 +307,7 @@ create_synthetic_set "$T7_DIR/proj7" "proj7" "$ts_old50" 1 1
 set +e
 (
     cd "$T7_DIR"
-    source "$MAIN_SCRIPT" --source-only
+    source "$T7_DIR/backup_full_db_files_zip.sh" --source-only
     run_backup_for_project "$T7_DIR/.env.proj7"
 ) >/dev/null 2>&1
 run_rc=$?

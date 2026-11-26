@@ -301,9 +301,3 @@ Das Skript ist so konzipiert, dass es sowohl **außerhalb des Webroots** (empfoh
    - Umfassende Standard-Ausschlüsse für WordPress (Caches, Updraft-/Ai1wm-/BackupBuddy-Archive, Debug-/Error-Logs, Wordfence-Logs, `.DS_Store`, `node_modules`).
    - Dateilisten für sftp werden sicher per Shell-Globbing verarbeitet (kein fehleranfälliges `ls`-Parsing bei Leer- oder Sonderzeichen).
    - Bereinigungen nach erfolgreicher Übertragung (`delete_if_transmitted`) sowie das Löschen veralteter Backups (`backup_live_time`) erfolgen gezielt über `find` unter Ausschluss der Schutzdateien (`.htaccess`).
-
-## backup_sync_proxy_\[projectname\].sh ##
-
-- Dateien werden aus dem Backup-Verzeichnis eines Serves auf einen Vermittler-Server geladen
-- Vom Vermittler-Server werden die Daten auf einen dritten Server synchronisiert
-- Jeder Sync-Vorgang wird in einer Log-Datei dokumentiert

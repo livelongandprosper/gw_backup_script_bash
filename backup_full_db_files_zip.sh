@@ -1349,7 +1349,7 @@ function parse_wp_config_file() {
     WP_PARSED_SCRIPT_DEBUG="$(extract_wp_constant_sed "$wp_config_file" SCRIPT_DEBUG)"
 }
 
-# Sucht in einem Ordner oder übergeordneten Ordnern nach wp-config.php
+# Sucht in einem Ordner, dessen Unterordnern (bis 2. Ebene) oder übergeordnetem Ordner nach wp-config.php
 function find_wp_config_in_path() {
     local base_dir="$1"
     [ -d "$base_dir" ] || return 1
@@ -1361,7 +1361,6 @@ function find_wp_config_in_path() {
         "$base_dir/web/wp-config.php"
         "$base_dir/wordpress/wp-config.php"
         "$base_dir/wp/wp-config.php"
-        "$(dirname "$base_dir")/wp-config.php"
     )
 
     for cand in "${candidates[@]}"; do
@@ -1370,6 +1369,19 @@ function find_wp_config_in_path() {
             return 0
         fi
     done
+
+    # Auch in weiteren Unterordnern bis zur zweiten Ebene suchen (z.B. <base>/<ebene1>/<ebene2>/wp-config.php)
+    local found_nested=""
+    found_nested=$(find "$base_dir" -maxdepth 3 -name "wp-config.php" ! -path "*/node_modules/*" ! -path "*/vendor/*" ! -path "*/.*/*" ! -path "*/log/*" 2>/dev/null | head -n 1)
+    if [ -n "$found_nested" ] && [ -f "$found_nested" ]; then
+        echo "$found_nested"
+        return 0
+    fi
+
+    if [ -f "$(dirname "$base_dir")/wp-config.php" ]; then
+        echo "$(dirname "$base_dir")/wp-config.php"
+        return 0
+    fi
     return 1
 }
 
@@ -1766,14 +1778,9 @@ function run_setup_assistant() {
     if [ -n "$input_source_files_dir" ]; then
         source_files_dir="$(resolve_dir_path "$input_source_files_dir")"
         if [ -d "$source_files_dir" ]; then
-            # Suche nach wp-config.php im Ordner oder gängigen Unterordnern
+            # Suche nach wp-config.php im Ordner oder Unterordnern (bis 2. Ebene)
             local found_wp_config=""
-            for wp_candidate in "$source_files_dir/wp-config.php" "$source_files_dir/public_html/wp-config.php" "$source_files_dir/htdocs/wp-config.php" "$source_files_dir/wordpress/wp-config.php" "$source_files_dir/wp/wp-config.php" "$(dirname "$source_files_dir")/wp-config.php"; do
-                if [ -f "$wp_candidate" ]; then
-                    found_wp_config="$wp_candidate"
-                    break
-                fi
-            done
+            found_wp_config="$(find_wp_config_in_path "$source_files_dir")"
 
             if [ -n "$found_wp_config" ]; then
                 echo

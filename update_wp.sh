@@ -464,7 +464,7 @@ function parse_wp_config_file() {
     return 0
 }
 
-# Sucht in einem Ordner oder übergeordneten Ordnern nach wp-config.php
+# Sucht in einem Ordner, dessen Unterordnern (bis 2. Ebene) oder übergeordnetem Ordner nach wp-config.php
 function find_wp_config_in_path() {
     local base_dir="$1"
     [ -d "$base_dir" ] || return 1
@@ -476,7 +476,6 @@ function find_wp_config_in_path() {
         "$base_dir/web/wp-config.php"
         "$base_dir/wordpress/wp-config.php"
         "$base_dir/wp/wp-config.php"
-        "$(dirname "$base_dir")/wp-config.php"
     )
 
     for cand in "${candidates[@]}"; do
@@ -485,6 +484,19 @@ function find_wp_config_in_path() {
             return 0
         fi
     done
+
+    # Auch in weiteren Unterordnern bis zur zweiten Ebene suchen (z.B. <base>/<ebene1>/<ebene2>/wp-config.php)
+    local found_nested=""
+    found_nested=$(find "$base_dir" -maxdepth 3 -name "wp-config.php" ! -path "*/node_modules/*" ! -path "*/vendor/*" ! -path "*/.*/*" ! -path "*/log/*" 2>/dev/null | head -n 1)
+    if [ -n "$found_nested" ] && [ -f "$found_nested" ]; then
+        echo "$found_nested"
+        return 0
+    fi
+
+    if [ -f "$(dirname "$base_dir")/wp-config.php" ]; then
+        echo "$(dirname "$base_dir")/wp-config.php"
+        return 0
+    fi
     return 1
 }
 
@@ -889,6 +901,8 @@ function run_setup_wizard() {
 
     refresh_env_files "$basename"
     local available_projects=()
+    local scanned_wp_paths=()
+    local scanned_site_urls=()
 
     for ef in "${env_files[@]}"; do
         local p
@@ -898,13 +912,41 @@ function run_setup_wizard() {
 
     if [ "${#available_projects[@]}" -eq 0 ]; then
         echo "Keine vorhandenen .env.<projekt>-Dateien gefunden."
-        read -rp "Name des Projekts (z. B. 'kundeA'): " manual_project_name
-        manual_project_name="${manual_project_name// /_}"
-        [ -n "$manual_project_name" ] && available_projects+=("$manual_project_name")
+        read -rp "Suchordner für WordPress-Installationen (relativ oder absolut, 'manuell' zum Überspringen) [..]: " in_scan_dir
+        in_scan_dir="${in_scan_dir:-..}"
+        if [ "$in_scan_dir" != "manuell" ] && [ "$in_scan_dir" != "-" ]; then
+            local resolved_scan_dir
+            resolved_scan_dir="$(resolve_dir_path "$in_scan_dir" "$basename")"
+            if [ -d "$resolved_scan_dir" ]; then
+                echo "Durchsuche '$resolved_scan_dir' nach WordPress-Installationen (wp-config.php) ..."
+                local found_configs=()
+                while IFS= read -r -d '' cfg; do
+                    found_configs+=("$cfg")
+                done < <(find "$resolved_scan_dir" -maxdepth 4 -name "wp-config.php" ! -path "*/node_modules/*" ! -path "*/vendor/*" ! -path "*/.*/*" ! -path "*/log/*" -print0 2>/dev/null)
+
+                for cfg in "${found_configs[@]}"; do
+                    local cur_site_dir cur_proj_name
+                    cur_site_dir="$(dirname "$cfg")"
+                    parse_wp_config_file "$cfg"
+                    cur_proj_name="$(suggest_project_name_from_wp "$cur_site_dir")"
+                    available_projects+=("$cur_proj_name")
+                    scanned_wp_paths+=("$cur_site_dir")
+                    scanned_site_urls+=("${WP_PARSED_HOME:-$WP_PARSED_SITEURL}")
+                    echo "  -> Gefunden: '$cur_proj_name' ($cur_site_dir)"
+                done
+            fi
+        fi
+
+        if [ "${#available_projects[@]}" -eq 0 ]; then
+            read -rp "Name des Projekts (z. B. 'kundeA'): " manual_project_name
+            manual_project_name="${manual_project_name// /_}"
+            [ -n "$manual_project_name" ] && available_projects+=("$manual_project_name")
+        fi
     fi
 
     local configured_count=0
     local first_configured_url=""
+    local proj_idx=0
 
     for proj in "${available_projects[@]}"; do
         local update_cfg="$basename/.update.$proj"
@@ -914,8 +956,9 @@ function run_setup_wizard() {
         echo "Konfiguration für Projekt: '$proj'"
         echo "--------------------------------------------------"
 
-        local current_wp_path=""
-        local current_site_url=""
+        local current_wp_path="${scanned_wp_paths[$proj_idx]:-}"
+        local current_site_url="${scanned_site_urls[$proj_idx]:-}"
+        proj_idx=$((proj_idx + 1))
         local current_must_contain=""
         local current_check_paths=""
         local current_skip_plugins=""
@@ -957,6 +1000,14 @@ function run_setup_wizard() {
         read -rp "WordPress-Pfad (WP_PATH) [${current_wp_path:-../$proj}]: " in_wp_path
         current_wp_path="${in_wp_path:-${current_wp_path:-../$proj}}"
         current_wp_path="$(resolve_dir_path "$current_wp_path" "$basename")"
+
+        if [ -d "$current_wp_path" ] && [ ! -f "$current_wp_path/wp-config.php" ] && [ ! -f "$current_wp_path/wp-includes/version.php" ]; then
+            local nested_wp_cfg=""
+            nested_wp_cfg="$(find_wp_config_in_path "$current_wp_path" 2>/dev/null || true)"
+            if [ -n "$nested_wp_cfg" ] && [[ "$nested_wp_cfg" == "$current_wp_path"/* ]]; then
+                current_wp_path="$(dirname "$nested_wp_cfg")"
+            fi
+        fi
 
         # Falls WordPress-Pfad existiert, Werte per WP-CLI / wp-config ermitteln
         local detected_siteurl=""

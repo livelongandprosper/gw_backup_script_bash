@@ -54,6 +54,9 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
   - Automatische Ermittlung von `CHECK_PATHS` und `SCREENSHOT_PATHS` aus der Sitemap (`detect_check_paths_from_sitemap()` über `robots.txt`, `/wp-sitemap.xml`, `/sitemap_index.xml`, `/sitemap.xml` inkl. Sitemap-Index, POSIX-kompatibles `sed` ohne `-E`), mit Fallback auf `/` (nur Startseite).
   - `MUST_CONTAIN`- und Fatal-Error-Prüfung im HTML-Body (`update_wp.sh`) von Pipes auf Bash-Substring-Vergleich bzw. Here-String umgestellt, damit `set -o pipefail` bei großen HTML-Seiten keinen SIGPIPE-Fehlalarm (`MUST_CONTAIN` nicht gefunden) auslöst; zudem Ausgabeabstände zwischen Projekten im Setup und Update-Lauf geglättet.
   - Standard-Wartezeit für Gotenberg-Screenshots (`SCREENSHOT_WAIT` / `waitDelay`) von `2s` auf `5s` erhöht, damit Webfonts, Lazy-Loading-Bilder und Animationen vor der Aufnahme vollständig geladen sind.
+- **Erweiterte Suchtiefe für WordPress-Installationen (`backup_full_db_files_zip.sh` & `update_wp.sh`):**
+  - `find_wp_config_in_path()` durchsucht nach den Standard-Unterordnern nun zusätzlich per `find -maxdepth 3` beliebige Unterordner bis zur zweiten Ebene (`<basis>/<ebene1>/<ebene2>/wp-config.php`), bevor auf den übergeordneten Ordner zurückgefallen wird.
+  - Der Setup-Assistent in `backup_full_db_files_zip.sh` nutzt dafür nun ebenfalls `find_wp_config_in_path()`; in `update_wp.sh` durchsucht `run_setup_wizard()` bei fehlenden `.env.<projekt>`-Dateien optional ganze Verzeichnisbäume (`-maxdepth 4`) und löst verschachtelte `WP_PATH`-Angaben automatisch auf.
 
 ---
 

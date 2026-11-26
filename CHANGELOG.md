@@ -40,6 +40,11 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
 - **Veraltetes Hilfsskript `backup_sync_proxy_[projectname].sh`:**
   - Entfernung des nicht mehr benötigten Proxy-Sync-Skripts, da Remote-Übertragung und Bereinigung direkt und nativ über SFTP/Rsync im Hauptskript abgebildet werden.
 
+### Behoben
+- Korrigierte Argumentverschiebung beim WordPress-Scan, die Backup-Konfigurationswerte und Datenbankzugänge in falsche Variablen schrieb; ungültige oder verschobene Werte werden nun erkannt.
+- Backup- und Update-Konfigurationen escapen Shell-Sonderzeichen sicher; Projektwerte werden vor dem Laden zurückgesetzt und bestehende Scan-Konfigurationen nur nach Rückfrage überschrieben.
+- Fehlerbehandlung für Projektauswahl, JSON-Ausgabe, Retention-Eingaben, Plugin-Ausschlüsse, Update-Rückgabecodes und fehlende Backup-Konfiguration verbessert.
+
 ---
 
 ## [2.2.0] - 2026-11-25

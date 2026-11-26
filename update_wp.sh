@@ -56,6 +56,7 @@ cli_dry_run='false'
 cli_no_backup='false'
 cli_no_screenshots='false'
 cli_only=''
+cli_only_set='false'
 cli_setup='false'
 cli_update_wpcli='false'
 cli_test_screenshot='false'
@@ -79,6 +80,7 @@ for cli_arg in "$@"; do
             ;;
         --only=*)
             cli_only="${cli_arg#*=}"
+            cli_only_set='true'
             ;;
         --setup)
             cli_setup='true'
@@ -127,6 +129,16 @@ if [ "$cli_help" == "true" ]; then
     echo
     echo "Ohne Parameter im Terminal wird das interaktive Hauptmenü angezeigt."
     exit 0
+fi
+
+if [ "$cli_only_set" == "true" ]; then
+    case "$cli_only" in
+        core|plugins|themes|languages) ;;
+        *)
+            echo "FEHLER: Unbekannter --only Wert '$cli_only'. Erlaubt: core, plugins, themes, languages." >&2
+            exit 2
+            ;;
+    esac
 fi
 
 # Wenn --json aktiv ist, leiten wir alle normalen Ausgaben (stdout) nach stderr um,
@@ -705,6 +717,12 @@ function load_gotenberg_config() {
     fi
 }
 
+function quote_shell_value() {
+    local value="$1"
+    value=${value//\'/\'\\\'\'}
+    printf '%s' "$value"
+}
+
 # Schreibt eine .update.<projektname> Konfigurationsdatei
 function write_project_update_file() {
     local target_file="$1"
@@ -722,50 +740,63 @@ function write_project_update_file() {
     local screenshot_wait="${13:-2s}"
     local screenshot_cookies="${14:-}"
     local screenshot_ignore_rects="${15:-}"
+    local quoted_wp_path="$(quote_shell_value "$wp_path")"
+    local quoted_site_url="$(quote_shell_value "$site_url")"
+    local quoted_must_contain="$(quote_shell_value "$must_contain")"
+    local quoted_check_paths="$(quote_shell_value "$check_paths")"
+    local quoted_skip_plugins="$(quote_shell_value "$skip_plugins")"
+    local quoted_max_age="$(quote_shell_value "$max_age")"
+    local quoted_backup_first="$(quote_shell_value "$backup_first")"
+    local quoted_enable_screenshots="$(quote_shell_value "$enable_screenshots")"
+    local quoted_screenshot_paths="$(quote_shell_value "${screenshot_paths:-/ $check_paths}")"
+    local quoted_screenshot_widths="$(quote_shell_value "$screenshot_widths")"
+    local quoted_screenshot_wait="$(quote_shell_value "$screenshot_wait")"
+    local quoted_screenshot_cookies="$(quote_shell_value "$screenshot_cookies")"
+    local quoted_screenshot_ignore_rects="$(quote_shell_value "$screenshot_ignore_rects")"
 
     cat <<EOF > "$target_file"
-# update_wp.sh Konfigurationsdatei für Projekt '$p_name'
+# update_wp.sh Projekt-Konfigurationsdatei
 # Automatisch angelegt am $(date +"%Y-%m-%d %H:%M:%S")
 
 # Absoluter oder relativer Pfad zum WordPress-Wurzelverzeichnis
-WP_PATH="$wp_path"
+WP_PATH='$quoted_wp_path'
 
 # Öffentliche URL der Website (für HTTP- und Screenshot-Prüfungen)
-SITE_URL="$site_url"
+SITE_URL='$quoted_site_url'
 
 # Text / Schlagwort, das auf der Startseite zwingend vorhanden sein muss (z. B. Blogname / Firmentitel)
-MUST_CONTAIN="$must_contain"
+MUST_CONTAIN='$quoted_must_contain'
 
 # Pfade, die vor und nach dem Update per HTTP geprüft werden müssen (durch Leerzeichen getrennt)
-CHECK_PATHS="$check_paths"
+CHECK_PATHS='$quoted_check_paths'
 
 # Plugins, die beim automatischen Update ausgeschlossen werden sollen (z. B. kommerzielle Plugins)
-SKIP_PLUGINS="$skip_plugins"
+SKIP_PLUGINS='$quoted_skip_plugins'
 
 # Maximales Alter eines vorhandenen Backups in Minuten, falls kein neues erstellt wird (Standard: 60)
-BACKUP_MAX_AGE_MIN="$max_age"
+BACKUP_MAX_AGE_MIN='$quoted_max_age'
 
 # Vor dem Update automatisch ein vollständiges Backup via backup_full_db_files_zip.sh ausführen (yes/no)
-RUN_BACKUP_FIRST="$backup_first"
+RUN_BACKUP_FIRST='$quoted_backup_first'
 
 # Visuellen Screenshot-Vergleich vor und nach dem Update durchführen (yes/no)
-ENABLE_SCREENSHOTS="$enable_screenshots"
+ENABLE_SCREENSHOTS='$quoted_enable_screenshots'
 
 # Zu prüfende Pfade für Screenshots (Standard: "/" + CHECK_PATHS)
-SCREENSHOT_PATHS="${screenshot_paths:-/ $check_paths}"
+SCREENSHOT_PATHS='$quoted_screenshot_paths'
 
 # Viewport-Breiten für Screenshots in CSS-Pixeln (Standard: "1440 390")
-SCREENSHOT_WIDTHS="$screenshot_widths"
+SCREENSHOT_WIDTHS='$quoted_screenshot_widths'
 
 # Wartezeit vor Screenshot-Aufnahme in Gotenberg (Standard: "2s")
-SCREENSHOT_WAIT="$screenshot_wait"
+SCREENSHOT_WAIT='$quoted_screenshot_wait'
 
 # Optionale Cookies im JSON-Format (z. B. für Cookie-Consent / Banner)
 # SCREENSHOT_COOKIES='[{"name":"cookie_consent","value":"accepted","domain":"example.com"}]'
-SCREENSHOT_COOKIES='$screenshot_cookies'
+SCREENSHOT_COOKIES='$quoted_screenshot_cookies'
 
 # Optionale Ignore-Bereiche vor dem Bildvergleich (Format: "x,y,w,h;..." z. B. für dynamische Slider/Ticker)
-SCREENSHOT_IGNORE_RECTS='$screenshot_ignore_rects'
+SCREENSHOT_IGNORE_RECTS='$quoted_screenshot_ignore_rects'
 
 # Warn- und Fehlerschwellen für visuelle Differenz in Prozent (<1% GRÜN, 1-5% GELB, >5% ROT)
 SCREENSHOT_DIFF_THRESHOLD_WARN="1.0"
@@ -801,14 +832,19 @@ function setup_gotenberg_wizard() {
     read -rp "Gotenberg Timeout in Sekunden [$GOTENBERG_TIMEOUT]: " in_timeout
     GOTENBERG_TIMEOUT="${in_timeout:-$GOTENBERG_TIMEOUT}"
 
+    local quoted_gotenberg_url="$(quote_shell_value "$GOTENBERG_URL")"
+    local quoted_gotenberg_user="$(quote_shell_value "$GOTENBERG_USER")"
+    local quoted_gotenberg_pass="$(quote_shell_value "$GOTENBERG_PASS")"
+    local quoted_gotenberg_timeout="$(quote_shell_value "$GOTENBERG_TIMEOUT")"
+
     cat <<EOF > "$gotenberg_cfg"
 # Gotenberg 9 Konfiguration für update_wp.sh
 # Angelegt am $(date +"%Y-%m-%d %H:%M:%S")
 
-GOTENBERG_URL='$GOTENBERG_URL'
-GOTENBERG_USER='$GOTENBERG_USER'
-GOTENBERG_PASS='$GOTENBERG_PASS'
-GOTENBERG_TIMEOUT='$GOTENBERG_TIMEOUT'
+GOTENBERG_URL='$quoted_gotenberg_url'
+GOTENBERG_USER='$quoted_gotenberg_user'
+GOTENBERG_PASS='$quoted_gotenberg_pass'
+GOTENBERG_TIMEOUT='$quoted_gotenberg_timeout'
 EOF
     chmod 600 "$gotenberg_cfg" 2>/dev/null || true
     echo "-> Gespeichert als $gotenberg_cfg (chmod 600)"
@@ -1030,6 +1066,11 @@ function check_http_endpoint() {
     fi
 
     local status_code="${http_res%% *}"
+    if [[ "$status_code" =~ ^[0-9]+$ ]]; then
+        status_code=$((10#$status_code))
+    else
+        status_code=0
+    fi
     local time_sec="${http_res#* }"
     local time_ms=0
     if [ -n "$time_sec" ]; then
@@ -1561,6 +1602,14 @@ function run_update_for_project() {
         echo
         echo "Erstelle vollständiges Backup vor dem Update ..." | tee -a "$run_log"
         local backup_json_raw=""
+        if [ ! -f "$basename/.env.$project_name" ]; then
+            log_check_item "ROT" "ABBRUCH: Backup-Konfiguration '$basename/.env.$project_name' fehlt; der Backup-Assistent wird nicht gestartet." "$run_log"
+            final_status="rot"
+            final_exitcode=2
+            write_and_output_result
+            rm -f "$lock_file"
+            return 2
+        fi
         if [ -f "$backup_script" ]; then
             backup_json_raw=$("$backup_script" --project="$project_name" --scope=alles --json 2>> "$run_log")
             local backup_exitcode=$?
@@ -1753,8 +1802,12 @@ function run_update_for_project() {
             themes) do_themes="true" ;;
             languages) do_languages="true" ;;
             *)
-                echo "WARNUNG: Unbekannter --only Wert '$cli_only'. Führe alle Updates aus." | tee -a "$run_log" >&2
-                do_core="true"; do_plugins="true"; do_themes="true"; do_languages="true"
+                log_check_item "ROT" "ABBRUCH: Unbekannter --only Wert '$cli_only'." "$run_log"
+                final_status="rot"
+                final_exitcode=2
+                write_and_output_result
+                rm -f "$lock_file"
+                return 2
                 ;;
         esac
     fi
@@ -1788,8 +1841,12 @@ function run_update_for_project() {
         echo "3/6: Plugins aktualisieren ..." | tee -a "$run_log"
         local plugin_update_args=("--all")
         if [ -n "$SKIP_PLUGINS" ]; then
-            plugin_update_args+=("--exclude=$SKIP_PLUGINS")
-            skipped_list+=("$SKIP_PLUGINS")
+            local skipped_plugins=()
+            read -ra skipped_plugins <<< "$SKIP_PLUGINS"
+            local skipped_plugins_csv
+            skipped_plugins_csv="$(IFS=,; printf '%s' "${skipped_plugins[*]}")"
+            plugin_update_args+=("--exclude=$skipped_plugins_csv")
+            skipped_list+=("${skipped_plugins[@]}")
             echo " Ausgeschlossene Plugins: $SKIP_PLUGINS" | tee -a "$run_log"
         fi
 
@@ -1916,7 +1973,8 @@ function run_update_for_project() {
             new_entries=$(tail -n "$new_log_lines_count" "$debug_log_file" 2>/dev/null)
             echo "$new_entries" | tail -n 20 > "$run_dir/new_log_entries.log"
 
-            fatal_errors_count=$(echo "$new_entries" | grep -ciE '(Fatal error|E_COMPILE_ERROR|E_CORE_ERROR|E_PARSE)' || echo 0)
+            fatal_errors_count=$(echo "$new_entries" | grep -ciE '(Fatal error|E_COMPILE_ERROR|E_CORE_ERROR|E_PARSE)' || true)
+            fatal_errors_count="${fatal_errors_count:-0}"
             if [ "$fatal_errors_count" -gt 0 ]; then
                 log_check_item "ROT" "$fatal_errors_count Fatal Error(s) in $debug_log_file gefunden!" "$run_log"
                 status_reasons+=("$fatal_errors_count Fatal Error(s) im Debug-Log")
@@ -2292,7 +2350,10 @@ function run_main_menu() {
                 local test_u="https://example.com"
                 if [ "${#update_files[@]}" -gt 0 ]; then
                     local site_url_preview=""
-                    site_url_preview=$(grep -E '^SITE_URL=' "${update_files[0]}" 2>/dev/null | cut -d'"' -f2)
+                    local SITE_URL=""
+                    # shellcheck source=/dev/null
+                    source "${update_files[0]}"
+                    site_url_preview="$SITE_URL"
                     [ -n "$site_url_preview" ] && test_u="$site_url_preview"
                 fi
                 read -rp "Zu testende URL [$test_u]: " in_t_url
@@ -2406,6 +2467,10 @@ all_update_json_results=()
 
 for target_update_file in "${selected_update_files[@]}"; do
     run_update_for_project "$target_update_file"
+    update_project_exitcode=$?
+    if [ "$update_project_exitcode" -gt "$overall_update_exitcode" ]; then
+        overall_update_exitcode="$update_project_exitcode"
+    fi
 done
 
 # Wenn --json aktiv ist, geben wir das finale JSON auf stdout (fd 3) aus
@@ -2413,18 +2478,18 @@ if [ "$cli_json" == "true" ]; then
     if [ "${#all_update_json_results[@]}" -eq 1 ] && [ "$cli_project" != "alle" ]; then
         echo "${all_update_json_results[0]}" >&3
     else
-        out_json="[\n"
+        out_json=$'[\n'
         out_first=1
         for res_item in "${all_update_json_results[@]}"; do
             if [ "$out_first" -eq 1 ]; then
                 out_first=0
             else
-                out_json+=",\n"
+                out_json+=$',\n'
             fi
             out_json+="  $res_item"
         done
-        out_json+="\n]"
-        printf '%b\n' "$out_json" >&3
+        out_json+=$'\n]'
+        printf '%s\n' "$out_json" >&3
     fi
 fi
 

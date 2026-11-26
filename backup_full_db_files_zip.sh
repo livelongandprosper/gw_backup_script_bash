@@ -252,6 +252,42 @@ function normalize_scope() {
     esac
 }
 
+function quote_shell_value() {
+    local value="$1"
+    value=${value//\'/\'\\\'\'}
+    printf '%s' "$value"
+}
+
+function is_valid_project_selection() {
+    local choice="$1"
+    local count="$2"
+    [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] 2>/dev/null && [ "$choice" -le "$count" ] 2>/dev/null
+}
+
+function reset_project_config_variables() {
+    local config_var
+    for config_var in PROJECT_NAME PROJEKT_BASIS_DATEINAME DEFAULT_SCOPE DB_COUNT DB_HOST DB_NAME DB_USER DB_PASSWORD DB2_HOST DB2_NAME DB2_USER DB2_PASSWORD SOURCE_FILES_DIR SFTP_HOST SFTP_PORT SFTP_KEY SFTP_USER SFTP_DIRECTORY SFTP_PATH_TO_SSH_BINARY RSYNC_HOST RSYNC_USER RSYNC_DIRECTORY RSYNC_KEY RETENTION_MODE KEEP_DAILY_DAYS KEEP_WEEKLY_DAYS KEEP_MONTHLY_DAYS KEEP_MIN_SETS RETENTION_REMOTE BACKUP_LIVE_TIME DELETE_IF_TRANSMITTED HEALTHCHECK_URL STATUS_EMAIL_ADDRESS ALERT_EMAIL_ADDRESS; do
+        printf -v "$config_var" '%s' ''
+    done
+    unset SOURCE_FILES_DIR_IGNORE
+
+    for config_var in ${!DB_@}; do
+        if [[ "$config_var" =~ ^DB_[0-9]+_(HOST|NAME|USER|PASSWORD)$ ]]; then
+            printf -v "$config_var" '%s' ''
+        fi
+    done
+}
+
+function normalize_nonnegative_integer() {
+    local value="$1"
+    local fallback="$2"
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+        printf '%s' "$value"
+    else
+        printf '%s' "$fallback"
+    fi
+}
+
 # Formatiert Byte-Werte lesbar (z.B. "142.50 MB", "1.20 GB")
 function format_bytes_human() {
     local b="${1:-0}"
@@ -674,6 +710,7 @@ function apply_retention_local() {
     local DB_NAME=""
     local DB2_NAME=""
 
+    reset_project_config_variables
     # shellcheck source=/dev/null
     source "$p_env"
 
@@ -814,6 +851,7 @@ function apply_retention_remote() {
     local RSYNC_KEY=""
     local RSYNC_DIRECTORY=""
 
+    reset_project_config_variables
     # shellcheck source=/dev/null
     source "$p_env"
 
@@ -1412,18 +1450,51 @@ function write_project_env_file() {
     local dbs=("$@")
 
     local count=${#dbs[@]}
+    if [ $((count % 4)) -ne 0 ]; then
+        echo "FEHLER: Datenbank-Argumente für '$proj_name' müssen in Vierergruppen (Host, Name, User, Passwort) übergeben werden." >&2
+        return 1
+    fi
+    if ! [[ "$ret_mode" =~ ^(staffel|tage|aus)$ ]]; then
+        echo "FEHLER: Ungültiger Aufbewahrungsmodus '$ret_mode' für '$proj_name' (erlaubt: staffel, tage, aus)." >&2
+        return 1
+    fi
+    for retention_value in "$b_live_time" "$k_daily" "$k_weekly" "$k_monthly" "$k_min"; do
+        if ! [[ "$retention_value" =~ ^[0-9]+$ ]]; then
+            echo "FEHLER: Aufbewahrungswerte für '$proj_name' müssen nichtnegative Ganzzahlen sein." >&2
+            return 1
+        fi
+    done
+
+    local quoted_proj_name="$(quote_shell_value "$proj_name")"
+    local quoted_basis_name="$(quote_shell_value "$basis_name")"
+    local quoted_def_scope="$(quote_shell_value "$def_scope")"
+    local quoted_src_dir="$(quote_shell_value "$src_dir")"
+    local quoted_s_host="$(quote_shell_value "$s_host")"
+    local quoted_s_port="$(quote_shell_value "$s_port")"
+    local quoted_s_user="$(quote_shell_value "$s_user")"
+    local quoted_s_key="$(quote_shell_value "$s_key")"
+    local quoted_s_dir="$(quote_shell_value "$s_dir")"
+    local quoted_s_ssh_bin="$(quote_shell_value "${s_ssh_bin:-/usr/bin/ssh}")"
+    local quoted_r_host="$(quote_shell_value "$r_host")"
+    local quoted_r_user="$(quote_shell_value "$r_user")"
+    local quoted_r_dir="$(quote_shell_value "$r_dir")"
+    local quoted_r_key="$(quote_shell_value "$r_key")"
+    local quoted_ret_mode="$(quote_shell_value "$ret_mode")"
+    local quoted_ret_remote="$(quote_shell_value "$ret_remote")"
+    local quoted_del_transmitted="$(quote_shell_value "$del_transmitted")"
+    local quoted_healthcheck_url="$(quote_shell_value "$healthcheck_url")"
     local num_dbs=$((count / 4))
 
     cat > "$target_file" <<EOF
-# Zugangsdaten & Konfiguration für Projekt '$proj_name'
+# Zugangsdaten & Konfiguration für ein Projekt
 # automatisch erstellt am $(date) durch das Backup-Skript
 # Diese Datei enthält Zugangsdaten und sollte NICHT ins Git-Repository eingecheckt werden (siehe .gitignore).
 
-PROJECT_NAME='$proj_name'
-PROJEKT_BASIS_DATEINAME='$basis_name'
+PROJECT_NAME='$quoted_proj_name'
+PROJEKT_BASIS_DATEINAME='$quoted_basis_name'
 
 # Was soll standardmäßig gesichert werden, wenn nicht per --scope angegeben: alles / db / dateien
-DEFAULT_SCOPE='$def_scope'
+DEFAULT_SCOPE='$quoted_def_scope'
 
 # Datenbank-Konfiguration
 # Bei mehreren Datenbanken wird DB_COUNT sowie DB_1_*, DB_2_*, etc. verwendet.
@@ -1432,54 +1503,53 @@ EOF
 
     local db_idx=1
     for ((i=0; i<count; i+=4)); do
-        local h="${dbs[i]}"
-        local n="${dbs[i+1]}"
-        local u="${dbs[i+2]}"
-        local p="${dbs[i+3]}"
-        local esc_p=${p//\'/\'\\\'\'}
+        local h="$(quote_shell_value "${dbs[i]}")"
+        local n="$(quote_shell_value "${dbs[i+1]}")"
+        local u="$(quote_shell_value "${dbs[i+2]}")"
+        local p="$(quote_shell_value "${dbs[i+3]}")"
         cat >> "$target_file" <<EOF
 DB_${db_idx}_HOST='$h'
 DB_${db_idx}_NAME='$n'
 DB_${db_idx}_USER='$u'
-DB_${db_idx}_PASSWORD='$esc_p'
+DB_${db_idx}_PASSWORD='$p'
 EOF
         db_idx=$((db_idx + 1))
     done
 
     cat >> "$target_file" <<EOF
 
-SOURCE_FILES_DIR='$src_dir'
+SOURCE_FILES_DIR='$quoted_src_dir'
 # Auszuschließende Muster als Bash-Array - je Element ein Muster.
 # Beispiel: SOURCE_FILES_DIR_IGNORE=('*/cache/*' '*/backups/*')
 SOURCE_FILES_DIR_IGNORE=($ignore_literal)
 
-SFTP_HOST='$s_host'
-SFTP_PORT='$s_port'
-SFTP_KEY='$s_key'
-SFTP_USER='$s_user'
-SFTP_DIRECTORY='$s_dir'
-SFTP_PATH_TO_SSH_BINARY='${s_ssh_bin:-/usr/bin/ssh}'
+SFTP_HOST='$quoted_s_host'
+SFTP_PORT='$quoted_s_port'
+SFTP_KEY='$quoted_s_key'
+SFTP_USER='$quoted_s_user'
+SFTP_DIRECTORY='$quoted_s_dir'
+SFTP_PATH_TO_SSH_BINARY='$quoted_s_ssh_bin'
 
-RSYNC_HOST='$r_host'
-RSYNC_USER='$r_user'
-RSYNC_DIRECTORY='$r_dir'
-RSYNC_KEY='$r_key'
+RSYNC_HOST='$quoted_r_host'
+RSYNC_USER='$quoted_r_user'
+RSYNC_DIRECTORY='$quoted_r_dir'
+RSYNC_KEY='$quoted_r_key'
 
 # Aufbewahrungsregeln (Retention / Großvater-Vater-Sohn)
-RETENTION_MODE='$ret_mode'
+RETENTION_MODE='$quoted_ret_mode'
 KEEP_DAILY_DAYS=$k_daily
 KEEP_WEEKLY_DAYS=$k_weekly
 KEEP_MONTHLY_DAYS=$k_monthly
 KEEP_MIN_SETS=$k_min
-RETENTION_REMOTE='$ret_remote'
+RETENTION_REMOTE='$quoted_ret_remote'
 
 # Veraltet (wird bei fehlendem RETENTION_MODE als Fallback 'tage' genutzt):
 BACKUP_LIVE_TIME='$b_live_time'
-DELETE_IF_TRANSMITTED='$del_transmitted'
+DELETE_IF_TRANSMITTED='$quoted_del_transmitted'
 
 # Healthchecks.io Alarmierung (Ping bei Start mit /start, bei Ende mit /<exitcode>)
 # Leer lassen, um Healthchecks-Ping zu deaktivieren
-HEALTHCHECK_URL='$healthcheck_url'
+HEALTHCHECK_URL='$quoted_healthcheck_url'
 
 # E-Mail-Benachrichtigung (aktuell noch nicht implementiert)
 STATUS_EMAIL_ADDRESS=''
@@ -1638,9 +1708,20 @@ function scan_and_setup_wordpress_sites() {
         echo
         read -rp "Standard-Umfang - alles/db/dateien [alles]: " default_scope
         default_scope=${default_scope:-alles}
+        default_scope="$(normalize_scope "$default_scope")"
+        default_scope="${default_scope:-alles}"
 
         local target_env_file="$basename/.env.$project_name"
-        write_project_env_file "$target_env_file" "$project_name" "$basis_name" "$default_scope" "$source_files_dir" "$source_files_dir_ignore_literal" "0" "false" "" "" "" "" "" "/usr/bin/ssh" "" "" "" "" "" "" "staffel" "30" "90" "365" "3" "yes" "$db_host" "$db_name" "$db_user" "$db_pass"
+        if [ -e "$target_env_file" ]; then
+            read -rp "Konfiguration '$target_env_file' existiert bereits. Überschreiben? (j/N): " overwrite_choice
+            if [[ ! "$overwrite_choice" =~ ^[jJyY]$ ]]; then
+                echo "-> Bestehende Konfiguration '$target_env_file' bleibt unverändert."
+                continue
+            fi
+        fi
+        if ! write_project_env_file "$target_env_file" "$project_name" "$basis_name" "$default_scope" "$source_files_dir" "$source_files_dir_ignore_literal" "0" "false" "" "" "" "" "" "/usr/bin/ssh" "" "" "" "" "" "staffel" "30" "90" "365" "3" "yes" "$db_host" "$db_name" "$db_user" "$db_pass"; then
+            continue
+        fi
 
         echo "-> Projekt '$project_name' erfolgreich als $target_env_file gespeichert."
         created_count=$((created_count + 1))
@@ -1890,6 +1971,13 @@ function run_setup_assistant() {
     echo "--- Aufbewahrungsregeln (Retention / Großvater-Vater-Sohn) ---"
     read -rp "Aufbewahrungsmodus (staffel/tage/aus) [staffel]: " input_retention_mode
     local retention_mode="${input_retention_mode:-staffel}"
+    case "$retention_mode" in
+        staffel|tage|aus) ;;
+        *)
+            echo "Ungültiger Aufbewahrungsmodus '$retention_mode'; verwende 'staffel'."
+            retention_mode="staffel"
+            ;;
+    esac
     local keep_daily_days=30
     local keep_weekly_days=90
     local keep_monthly_days=365
@@ -1899,18 +1987,18 @@ function run_setup_assistant() {
 
     if [ "$retention_mode" = "staffel" ]; then
         read -rp "Tägliche Backups behalten (Tage) [30]: " input_k_daily
-        keep_daily_days="${input_k_daily:-30}"
+        keep_daily_days="$(normalize_nonnegative_integer "${input_k_daily:-30}" 30)"
         read -rp "Wöchentliche Backups danach behalten (bis Tag) [90]: " input_k_weekly
-        keep_weekly_days="${input_k_weekly:-90}"
+        keep_weekly_days="$(normalize_nonnegative_integer "${input_k_weekly:-90}" 90)"
         read -rp "Monatliche Backups danach behalten (bis Tag, 0=unbegrenzt) [365]: " input_k_monthly
-        keep_monthly_days="${input_k_monthly:-365}"
+        keep_monthly_days="$(normalize_nonnegative_integer "${input_k_monthly:-365}" 365)"
         read -rp "Mindestanzahl geschützter Backup-Sätze [3]: " input_k_min
-        keep_min_sets="${input_k_min:-3}"
+        keep_min_sets="$(normalize_nonnegative_integer "${input_k_min:-3}" 3)"
         read -rp "Aufbewahrungsregel auch auf dem Fernziel anwenden? (yes/no) [yes]: " input_ret_remote
         retention_remote="${input_ret_remote:-yes}"
     elif [ "$retention_mode" = "tage" ]; then
         read -rp "Backup-Lebenszeit in Tagen (0 = unendlich) [30]: " input_live_time
-        backup_live_time="${input_live_time:-30}"
+        backup_live_time="$(normalize_nonnegative_integer "${input_live_time:-30}" 30)"
         keep_daily_days="$backup_live_time"
         read -rp "Aufbewahrungsregel auch auf dem Fernziel anwenden? (yes/no) [yes]: " input_ret_remote
         retention_remote="${input_ret_remote:-yes}"
@@ -1932,7 +2020,10 @@ function run_setup_assistant() {
         db_args+=("${db_hosts[$i]}" "${db_names[$i]}" "${db_users[$i]}" "${db_passwords[$i]}")
     done
 
-    write_project_env_file "$target_env_file" "$project_name" "$projekt_basis_dateiname" "$default_scope" "$source_files_dir" "$source_files_dir_ignore_literal" "$backup_live_time" "$delete_if_transmitted" "$sftp_host" "$sftp_port" "$sftp_user" "$sftp_key" "$sftp_directory" "$sftp_path_to_ssh_binary" "$rsync_host" "$rsync_user" "$rsync_directory" "$rsync_key" "$healthcheck_url" "$retention_mode" "$keep_daily_days" "$keep_weekly_days" "$keep_monthly_days" "$keep_min_sets" "$retention_remote" "${db_args[@]}"
+    if ! write_project_env_file "$target_env_file" "$project_name" "$projekt_basis_dateiname" "$default_scope" "$source_files_dir" "$source_files_dir_ignore_literal" "$backup_live_time" "$delete_if_transmitted" "$sftp_host" "$sftp_port" "$sftp_user" "$sftp_key" "$sftp_directory" "$sftp_path_to_ssh_binary" "$rsync_host" "$rsync_user" "$rsync_directory" "$rsync_key" "$healthcheck_url" "$retention_mode" "$keep_daily_days" "$keep_weekly_days" "$keep_monthly_days" "$keep_min_sets" "$retention_remote" "${db_args[@]}"; then
+        echo "FEHLER: Projekt-Konfiguration wurde nicht geschrieben." >&2
+        return 1
+    fi
 
     echo
     echo "======================================"
@@ -1987,6 +2078,7 @@ function run_restore_for_project() {
     local project_name
     project_name="$(project_name_from_env_file "$project_env_file")"
 
+    reset_project_config_variables
     # shellcheck source=/dev/null
     source "$project_env_file"
 
@@ -2137,6 +2229,7 @@ function show_project_overview() {
         local overview_project_name
         overview_project_name="$(project_name_from_env_file "$overview_env_file")"
 
+        reset_project_config_variables
         # shellcheck source=/dev/null
         source "$overview_env_file"
 
@@ -2183,7 +2276,11 @@ function show_project_data_size() {
         done
         echo "======================================"
         read -rp "Projekt auswählen (Nummer): " size_choice
-        size_env_file="${env_files[$((size_choice - 1))]}"
+        if ! is_valid_project_selection "$size_choice" "${#env_files[@]}"; then
+            echo "Ungültige Auswahl." >&2
+            return 1
+        fi
+        size_env_file="${env_files[$((10#$size_choice - 1))]}"
     fi
 
     if [ -z "$size_env_file" ]; then
@@ -2194,6 +2291,7 @@ function show_project_data_size() {
     local size_project_name
     size_project_name="$(project_name_from_env_file "$size_env_file")"
 
+    reset_project_config_variables
     # shellcheck source=/dev/null
     source "$size_env_file"
 
@@ -2226,6 +2324,7 @@ function run_pre_backup_checks() {
     local p_name
     p_name="$(project_name_from_env_file "$project_env_file")"
 
+    reset_project_config_variables
     # shellcheck source=/dev/null
     source "$project_env_file"
 
@@ -2593,6 +2692,7 @@ function convert_project_env_to_staffel() {
     local RETENTION_REMOTE=""
     local BACKUP_LIVE_TIME=""
 
+    reset_project_config_variables
     # shellcheck source=/dev/null
     source "$env_f"
 
@@ -2643,6 +2743,7 @@ function show_retention_dry_run() {
     local DB_NAME=""
     local DB2_NAME=""
 
+    reset_project_config_variables
     # shellcheck source=/dev/null
     source "$p_env"
 
@@ -3077,10 +3178,12 @@ function backup_db() {
         )
 
         # Optionale Flags prüfen (MySQL 8 / Cloud DB Kompatibilität)
-        if mysqldump --help 2>&1 | grep -q -- "--column-statistics"; then
+        local mysqldump_help
+        mysqldump_help="$(mysqldump --help 2>&1 || true)"
+        if [[ "$mysqldump_help" == *"--column-statistics"* ]]; then
             mysqldump_opts+=("--column-statistics=0")
         fi
-        if mysqldump --help 2>&1 | grep -q -- "--set-gtid-purged"; then
+        if [[ "$mysqldump_help" == *"--set-gtid-purged"* ]]; then
             mysqldump_opts+=("--set-gtid-purged=OFF")
         fi
 
@@ -3177,11 +3280,20 @@ function run_backup_for_project() {
     # Alte Werte aus einem zuvor gesicherten Projekt entfernen, damit nichts
     # (insbesondere die Ausschluss-Muster) fälschlich übernommen wird, wenn die
     # aktuelle .env-Datei die Variable nicht selbst setzt.
-    unset SOURCE_FILES_DIR_IGNORE
+    reset_project_config_variables
 
     # .env laden
     # shellcheck source=/dev/null
     source "$project_env_file"
+
+    for retention_var in KEEP_DAILY_DAYS KEEP_WEEKLY_DAYS KEEP_MONTHLY_DAYS KEEP_MIN_SETS; do
+        retention_value="${!retention_var:-}"
+        if [ -n "$retention_value" ] && ! [[ "$retention_value" =~ ^[0-9]+$ ]]; then
+            echo "FEHLER: Aufbewahrungswert '$retention_var=$retention_value' in '$project_env_file' ist ungültig. Bitte die Konfiguration prüfen; fehlerhafte bestehende .env-Dateien werden nicht automatisch repariert." >&2
+            overall_exitcode=2
+            return 2
+        fi
+    done
 
     # Zuordnung auf die im Skript verwendeten Variablennamen
     projekt_basis_dateiname="${PROJEKT_BASIS_DATEINAME:-$project_name}"
@@ -3323,7 +3435,7 @@ function run_backup_for_project() {
         found_wp_config="$(find_wp_config_in_path "$source_files_dir")"
         if [ -n "$found_wp_config" ] && [ -f "$found_wp_config" ]; then
             parse_wp_config_file "$found_wp_config"
-            wp_table_prefix="${WP_PARSED_TABLE_PREFIX:-wp_}"
+            wp_table_prefix="${WP_PARSED_PREFIX:-wp_}"
         fi
     fi
 
@@ -3767,6 +3879,10 @@ fi
 # Kein Projekt vorhanden -> Setup-Assistent für ein neues Projekt starten
 if [ "${#env_files[@]}" -eq 0 ]; then
     if [ -n "$cli_project" ] && [ "$cli_project" != "alle" ]; then
+        if [ ! -t 0 ]; then
+            echo "Kein Projekt '$cli_project' gefunden; im nicht-interaktiven Modus wird kein Setup-Assistent gestartet." >&2
+            exit 2
+        fi
         echo "======================================"
         echo "Projekt '$cli_project' existiert noch nicht - Setup-Assistent wird gestartet ..."
         echo "======================================"
@@ -3843,7 +3959,11 @@ if [ "$restore_mode" == "true" ]; then
         done
         echo "======================================"
         read -rp "Projekt auswählen (Nummer): " project_choice
-        selected_index=$((project_choice - 1))
+        if ! is_valid_project_selection "$project_choice" "${#env_files[@]}"; then
+            echo "Ungültige Auswahl." >&2
+            exit 1
+        fi
+        selected_index=$((10#$project_choice - 1))
         restore_target_env_file="${env_files[$selected_index]}"
     fi
 
@@ -3888,7 +4008,11 @@ if [ "$check_mode" == "true" ]; then
                 done
                 exit 0
             else
-                selected_index=$((chk_choice - 1))
+                if ! is_valid_project_selection "$chk_choice" "${#env_files[@]}"; then
+                    echo "Ungültige Auswahl." >&2
+                    exit 1
+                fi
+                selected_index=$((10#$chk_choice - 1))
                 chk_target_env="${env_files[$selected_index]}"
             fi
         fi
@@ -3909,6 +4033,10 @@ elif [ -n "$cli_project" ]; then
     elif [ -f "$match_env_file" ]; then
         selected_env_files=("$match_env_file")
     else
+        if [ ! -t 0 ]; then
+            echo "Kein Projekt '$cli_project' gefunden; im nicht-interaktiven Modus wird kein Setup-Assistent gestartet." >&2
+            exit 2
+        fi
         echo "Kein Projekt '$cli_project' gefunden - Setup-Assistent dafür wird gestartet ..."
         run_setup_assistant "$cli_project"
         selected_env_files=("$match_env_file")
@@ -3929,7 +4057,11 @@ else
     if [ "$project_choice" == "a" ]; then
         selected_env_files=("${env_files[@]}")
     else
-        selected_index=$((project_choice - 1))
+        if ! is_valid_project_selection "$project_choice" "${#env_files[@]}"; then
+            echo "Ungültige Auswahl." >&2
+            exit 1
+        fi
+        selected_index=$((10#$project_choice - 1))
         selected_env_files=("${env_files[$selected_index]}")
     fi
 fi
@@ -3956,18 +4088,18 @@ if [ "$cli_json" == "true" ]; then
     if [ "${#all_project_json_results[@]}" -eq 1 ] && [ "$cli_project" != "alle" ]; then
         echo "${all_project_json_results[0]}" >&3
     else
-        out_json="[\n"
+        out_json=$'[\n'
         out_first=1
         for res_item in "${all_project_json_results[@]}"; do
             if [ "$out_first" -eq 1 ]; then
                 out_first=0
             else
-                out_json+=",\n"
+                out_json+=$',\n'
             fi
             out_json+="  $res_item"
         done
-        out_json+="\n]"
-        printf '%b\n' "$out_json" >&3
+        out_json+=$'\n]'
+        printf '%s\n' "$out_json" >&3
     fi
 fi
 

@@ -37,6 +37,10 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
   - Synthetische Testsuite `test_retention_suite.sh` mit 8 Testfällen (400-Tage-Staffelung, Mindestbestand, unvollständige Sätze, Dateischutz, Abwärtskompatibilität, Konvertierung, Sicherheitsbarriere, SFTP-Fehlertoleranz).
 - **Entwicklungsstandards (`AGENTS.md`):**
   - Verbindliche Projektstandards zu Sprache, Changelog-/Doku-Pflicht, Multi-Projekt-Architektur, Bash-/Portabilitätsregeln, Sicherheits- & Ampel-Konventionen sowie Testanforderungen in `AGENTS.md` festgehalten.
+- **Abweichende Ports, Hetzner Storage Box & optionale Passwort-Auth (`backup_full_db_files_zip.sh`):**
+  - `RSYNC_PORT` (Standard `22`, z. B. `23` für Hetzner Storage Box) in `.env.<projekt>`, `.env.example`, Setup-Assistent, WordPress-Auto-Import, `rsync`-Upload (`ssh -p`) und Remote-Retention (`apply_retention_remote()`) ergänzt.
+  - Optionale Passwort-Authentifizierung (`SFTP_PASSWORD`, `RSYNC_PASSWORD`) über `SSHPASS` / `sshpass -e` (ohne Passwort in CLI-Argumenten) ergänzt, falls kein SSH-Key verwendet wird (inkl. Prüfung auf vorhandenes `sshpass`).
+  - Setup- und Doku-Hinweise für Hetzner Storage Boxen ergänzt (Port `23` für `rsync`/SSH, relative Zielpfade ohne führendes `/`, OpenSSH-Key-Format).
 
 ### Entfernt
 - **Veraltetes Hilfsskript `backup_sync_proxy_[projectname].sh`:**

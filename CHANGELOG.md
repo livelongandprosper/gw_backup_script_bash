@@ -59,6 +59,8 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
 - **Erweiterte Suchtiefe für WordPress-Installationen (`backup_full_db_files_zip.sh` & `update_wp.sh`):**
   - `find_wp_config_in_path()` durchsucht nach den Standard-Unterordnern nun zusätzlich per `find -maxdepth 3` beliebige Unterordner bis zur zweiten Ebene (`<basis>/<ebene1>/<ebene2>/wp-config.php`), bevor auf den übergeordneten Ordner zurückgefallen wird.
   - Der Setup-Assistent in `backup_full_db_files_zip.sh` nutzt dafür nun ebenfalls `find_wp_config_in_path()`; in `update_wp.sh` durchsucht `run_setup_wizard()` bei fehlenden `.env.<projekt>`-Dateien optional ganze Verzeichnisbäume (`-maxdepth 4`) und löst verschachtelte `WP_PATH`-Angaben automatisch auf.
+- **Externe Übertragung im WordPress-Auto-Import (`backup_full_db_files_zip.sh`):**
+  - `scan_and_setup_wordpress_sites()` (`--scan-wp` / automatische Ersteinrichtung) fragt nun pro Installation optional ab, ob Backups extern per SFTP und/oder rsync übertragen und nach erfolgreicher Übertragung lokal gelöscht werden sollen (`DELETE_IF_TRANSMITTED`). Bei mehreren Installationen werden eingegebene Remote-Daten automatisch als Standardvorschlag für nachfolgende Projekte übernommen.
 
 ---
 

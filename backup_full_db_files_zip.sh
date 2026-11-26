@@ -1657,6 +1657,19 @@ function scan_and_setup_wordpress_sites() {
     fi
 
     local created_count=0
+    local prev_remote_configured="false"
+    local prev_sftp_host=""
+    local prev_sftp_port="22"
+    local prev_sftp_user=""
+    local prev_sftp_key="$HOME/.ssh/id_rsa_backup"
+    local prev_sftp_directory=""
+    local prev_sftp_ssh_bin="/usr/bin/ssh"
+    local prev_rsync_host=""
+    local prev_rsync_user=""
+    local prev_rsync_directory=""
+    local prev_rsync_key="$HOME/.ssh/id_rsa_backup"
+    local prev_delete_if_transmitted="false"
+
     for sel_idx in "${selected_indices[@]}"; do
         local arr_idx=$((sel_idx - 1))
         local cur_cfg="${found_configs[$arr_idx]}"
@@ -1723,6 +1736,110 @@ function scan_and_setup_wordpress_sites() {
         default_scope="$(normalize_scope "$default_scope")"
         default_scope="${default_scope:-alles}"
 
+        local sftp_host=""
+        local sftp_port=""
+        local sftp_user=""
+        local sftp_key=""
+        local sftp_directory=""
+        local sftp_path_to_ssh_binary="/usr/bin/ssh"
+        local rsync_host=""
+        local rsync_user=""
+        local rsync_directory=""
+        local rsync_key=""
+        local delete_if_transmitted="false"
+
+        echo
+        local sync_choice="N"
+        if [ "$prev_remote_configured" = "true" ]; then
+            read -rp "Sollen die Backup-Dateien extern gesichert/gesynct werden (SFTP/rsync)? (J/n) [J]: " sync_choice
+            sync_choice=${sync_choice:-J}
+        else
+            read -rp "Sollen die Backup-Dateien extern gesichert/gesynct werden (SFTP/rsync)? (j/N) [N]: " sync_choice
+            sync_choice=${sync_choice:-N}
+        fi
+
+        if [[ "$sync_choice" =~ ^[jJyY]$ ]]; then
+            echo
+            echo "--- sftp-Übertragung (optional, leer oder '-' lassen zum Überspringen) ---"
+            if [ -n "$prev_sftp_host" ]; then
+                read -rp "sftp Host [$prev_sftp_host]: " input_sftp_host
+                sftp_host="${input_sftp_host:-$prev_sftp_host}"
+                [ "$sftp_host" = "-" ] && sftp_host=""
+            else
+                read -rp "sftp Host (leer = kein SFTP): " sftp_host
+                [ "$sftp_host" = "-" ] && sftp_host=""
+            fi
+            if [ -n "$sftp_host" ]; then
+                read -rp "sftp Port [${prev_sftp_port:-22}]: " input_sftp_port
+                sftp_port="${input_sftp_port:-${prev_sftp_port:-22}}"
+                if [ -n "$prev_sftp_user" ]; then
+                    read -rp "sftp User [$prev_sftp_user]: " input_sftp_user
+                    sftp_user="${input_sftp_user:-$prev_sftp_user}"
+                else
+                    read -rp "sftp User: " sftp_user
+                fi
+                read -rp "Pfad zum privaten SSH-Key [${prev_sftp_key:-$HOME/.ssh/id_rsa_backup}]: " input_sftp_key
+                sftp_key="${input_sftp_key:-${prev_sftp_key:-$HOME/.ssh/id_rsa_backup}}"
+                if [ -n "$prev_sftp_directory" ]; then
+                    read -rp "sftp Zielverzeichnis (optional, '-' = leer) [$prev_sftp_directory]: " input_sftp_dir
+                    sftp_directory="${input_sftp_dir:-$prev_sftp_directory}"
+                    [ "$sftp_directory" = "-" ] && sftp_directory=""
+                else
+                    read -rp "sftp Zielverzeichnis (optional): " sftp_directory
+                fi
+                read -rp "Pfad zum lokalen ssh-Binary [${prev_sftp_ssh_bin:-/usr/bin/ssh}]: " input_sftp_ssh_bin
+                sftp_path_to_ssh_binary="${input_sftp_ssh_bin:-${prev_sftp_ssh_bin:-/usr/bin/ssh}}"
+            fi
+
+            echo
+            echo "--- rsync-Übertragung (optional, leer oder '-' lassen zum Überspringen) ---"
+            if [ -n "$prev_rsync_host" ]; then
+                read -rp "rsync Host [$prev_rsync_host]: " input_rsync_host
+                rsync_host="${input_rsync_host:-$prev_rsync_host}"
+                [ "$rsync_host" = "-" ] && rsync_host=""
+            else
+                read -rp "rsync Host (leer = kein rsync): " rsync_host
+                [ "$rsync_host" = "-" ] && rsync_host=""
+            fi
+            if [ -n "$rsync_host" ]; then
+                if [ -n "$prev_rsync_user" ]; then
+                    read -rp "rsync User [$prev_rsync_user]: " input_rsync_user
+                    rsync_user="${input_rsync_user:-$prev_rsync_user}"
+                else
+                    read -rp "rsync User: " rsync_user
+                fi
+                if [ -n "$prev_rsync_directory" ]; then
+                    read -rp "rsync Zielverzeichnis (relativ zum rsync-User-Homeverzeichnis) [$prev_rsync_directory]: " input_rsync_dir
+                    rsync_directory="${input_rsync_dir:-$prev_rsync_directory}"
+                else
+                    read -rp "rsync Zielverzeichnis (relativ zum rsync-User-Homeverzeichnis): " rsync_directory
+                fi
+                read -rp "Pfad zum privaten SSH-Key [${prev_rsync_key:-$HOME/.ssh/id_rsa_backup}]: " input_rsync_key
+                rsync_key="${input_rsync_key:-${prev_rsync_key:-$HOME/.ssh/id_rsa_backup}}"
+            fi
+
+            if [ -n "$sftp_host" ] || [ -n "$rsync_host" ]; then
+                echo
+                read -rp "Lokale Backup-Dateien nach erfolgreicher Übertragung löschen? (true/false) [$prev_delete_if_transmitted]: " input_del_transmitted
+                delete_if_transmitted="${input_del_transmitted:-$prev_delete_if_transmitted}"
+                if [ "$delete_if_transmitted" != "true" ] && [ "$delete_if_transmitted" != "false" ]; then
+                    delete_if_transmitted="false"
+                fi
+                prev_remote_configured="true"
+                prev_sftp_host="$sftp_host"
+                prev_sftp_port="${sftp_port:-22}"
+                prev_sftp_user="$sftp_user"
+                prev_sftp_key="${sftp_key:-$HOME/.ssh/id_rsa_backup}"
+                prev_sftp_directory="$sftp_directory"
+                prev_sftp_ssh_bin="${sftp_path_to_ssh_binary:-/usr/bin/ssh}"
+                prev_rsync_host="$rsync_host"
+                prev_rsync_user="$rsync_user"
+                prev_rsync_directory="$rsync_directory"
+                prev_rsync_key="${rsync_key:-$HOME/.ssh/id_rsa_backup}"
+                prev_delete_if_transmitted="$delete_if_transmitted"
+            fi
+        fi
+
         local target_env_file="$basename/.env.$project_name"
         if [ -e "$target_env_file" ]; then
             read -rp "Konfiguration '$target_env_file' existiert bereits. Überschreiben? (j/N): " overwrite_choice
@@ -1731,7 +1848,7 @@ function scan_and_setup_wordpress_sites() {
                 continue
             fi
         fi
-        if ! write_project_env_file "$target_env_file" "$project_name" "$basis_name" "$default_scope" "$source_files_dir" "$source_files_dir_ignore_literal" "0" "false" "" "" "" "" "" "/usr/bin/ssh" "" "" "" "" "" "staffel" "30" "90" "365" "3" "yes" "$db_host" "$db_name" "$db_user" "$db_pass"; then
+        if ! write_project_env_file "$target_env_file" "$project_name" "$basis_name" "$default_scope" "$source_files_dir" "$source_files_dir_ignore_literal" "0" "$delete_if_transmitted" "$sftp_host" "$sftp_port" "$sftp_user" "$sftp_key" "$sftp_directory" "$sftp_path_to_ssh_binary" "$rsync_host" "$rsync_user" "$rsync_directory" "$rsync_key" "" "staffel" "30" "90" "365" "3" "yes" "$db_host" "$db_name" "$db_user" "$db_pass"; then
             continue
         fi
 

@@ -215,6 +215,7 @@ Das Skript kann selbstständig WordPress-Installationen suchen und vollständig 
 - **Automatisches Auslesen:** `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST` und Tabellen-Präfixe werden direkt und sicher aus `wp-config.php` ausgelesen.
 - **Intelligente Vorschläge:** Aus `WP_HOME`, `WP_SITEURL` oder dem Ordnernamen wird automatisch ein passender Projektname vorgeschlagen.
 - **Ausschlussmuster:** Typische WordPress-Cache- und Backup-Verzeichnisse (`*/wp-content/cache/*`, `*/wp-content/uploads/cache/*`, `*/wp-content/updraft/*`, etc.) werden auf Wunsch direkt als Ausschluss hinterlegt.
+- **Externe Übertragung (SFTP/rsync):** Auf Wunsch können pro Installation direkt SFTP- und/oder rsync-Zugangsdaten sowie `DELETE_IF_TRANSMITTED` konfiguriert werden; bei mehreren Installationen werden die zuletzt eingegebenen Werte als Standardvorschlag übernommen.
 - **Manuelle Ergänzung:** Sollten Zugangsdaten fehlen oder abweichen, können alle Werte während des Assistenten bestätigt, angepasst oder manuell eingegeben werden.
 
 ### Projekt- und Umfang-Auswahl beim Backup ###

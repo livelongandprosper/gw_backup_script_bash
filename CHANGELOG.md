@@ -48,6 +48,12 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
 - **SFTP- & rsync-Verbindungstest (`backup_full_db_files_zip.sh`):**
   - Neue Testfunktionen `test_sftp_connection()`, `test_rsync_connection()` (`rsync --list-only`) und `test_remote_connections_for_env()` prüfen Login, SSH-Key/Passwort (`SSH_ASKPASS`), Port und Erreichbarkeit des konfigurierten Zielverzeichnisses nicht-destruktiv.
   - Direkt nach der Einrichtung von SFTP bzw. rsync in beiden Assistenten (`run_setup_assistant()`, `scan_and_setup_wordpress_sites()`) auf Wunsch ausführbar sowie über Hauptmenüpunkt `11) SFTP- & rsync-Verbindung testen` und `--test-remote [--project=<name>|alle]` jederzeit aufrufbar.
+- **Datenbank-Dump-Erkennung, PHP-Fallback & interaktive Exit-127-Behebung (`backup_full_db_files_zip.sh`):**
+  - `find_mysqldump_bin()` erkennt automatisch `mysqldump`, `mariadb-dump` sowie gängige Sonderpfade (inkl. `MYSQLDUMP_BIN` in `.env.<projekt>`).
+  - Fehlt ein natives Dump-Werkzeug auf dem Server (Exit-Code `127`, z. B. auf Shared-Hosting-Containern), bietet das Skript interaktiv die Aktivierung und Speicherung des integrierten PHP-MySQL-Dumpers (`backup_db_via_php()` über `mysqli` / `PDO_MySQL`) bzw. die Angabe eines eigenen Binary-Pfads an und nutzt den PHP-Dumper im Cronjob-Modus automatisch als Fallback.
+  - `run_pre_backup_checks()` prüft zusätzlich die Verfügbarkeit des Dump-Werkzeugs und nutzt bei fehlendem `mysql`-Client ebenfalls PHP für die DB-Erreichbarkeitsprüfung.
+- **Klar strukturierte Schritt-Überschriften im Backup-Lauf (`backup_full_db_files_zip.sh`):**
+  - `print_backup_step()` hebt die einzelnen Backup-Phasen (`Schritt 2: Datenbank-Sicherung`, `Schritt 3: Datei-Sicherung (ZIP)`, `Schritt 4: Externe Übertragung`, `Schritt 5: Lokale Bereinigung nach Übertragung`, `Schritt 6: Aufbewahrungsregeln (Retention)`) visuell mit Abständen und Trennern auf Konsole und im Log hervor.
 
 ### Entfernt
 - **`sshpass`-Abhängigkeit entfernt (`backup_full_db_files_zip.sh`, `README.md`):**

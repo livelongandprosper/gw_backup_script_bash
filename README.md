@@ -302,7 +302,9 @@ Das Skript ist so konzipiert, dass es sowohl **außerhalb des Webroots** (empfoh
 3. **Dateirechte & Umask (`umask 077`):**
    - Alle neu angelegten Verzeichnisse, Backups, temporären Dateien und Logs werden mit restriktiven Rechten (nur für den ausführenden Benutzer les-/schreibbar) erzeugt. `.env.*`-Dateien werden standardmäßig auf `chmod 600` gesetzt.
 4. **Fehlerbehandlung & Verlässlichkeit bei Datenbank-Dumps:**
-   - Exit-Codes von `mysqldump` und `zip` werden explizit geprüft. Sollte ein Dump fehlschlagen, wird der Vorgang abgebrochen und keine unvollständige oder leere Backup-Datei erstellt.
+   - Automatische Erkennung von `mysqldump`, `mariadb-dump` sowie gängigen Sonderpfaden (optional über `MYSQLDUMP_BIN` in `.env.<projekt>` konfigurierbar).
+   - Fehlt ein natives Dump-Binary auf dem Server (Exit-Code `127`), steht ein integrierter PHP-Datenbank-Dumper (`mysqli` / `PDO_MySQL`) als Fallback bereit; im interaktiven Betrieb wird direkt die Aktivierung (`MYSQLDUMP_BIN='php-fallback'`) oder die Angabe eines eigenen Pfads angeboten.
+   - Exit-Codes von `mysqldump`/`mariadb-dump` und `zip` werden explizit geprüft. Sollte ein Dump fehlschlagen, wird der Vorgang abgebrochen und keine unvollständige oder leere Backup-Datei erstellt.
    - Standardmäßig werden Tabellenstrukturen, Daten, Routines (`--routines`), Triggers (`--triggers`), `--quick`, `--max_allowed_packet=512M` und `--default-character-set=utf8mb4` verwendet.
    - Kompatibilität mit MySQL 8.0 und Managed Cloud DBs wird automatisch sichergestellt (`--column-statistics=0` und `--set-gtid-purged=OFF`, sofern vom Client unterstützt).
    - `DEFINER`-Deklarationen werden automatisch und portabel bereinigt (`CURRENT_USER`), um Restores auf anderen Servern zu vereinfachen.

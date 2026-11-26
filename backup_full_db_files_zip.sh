@@ -271,7 +271,7 @@ function is_valid_project_selection() {
 
 function reset_project_config_variables() {
     local config_var
-    for config_var in PROJECT_NAME PROJEKT_BASIS_DATEINAME DEFAULT_SCOPE DB_COUNT SOURCE_FILES_DIR SFTP_HOST SFTP_PORT SFTP_KEY SFTP_PASSWORD SFTP_USER SFTP_DIRECTORY SFTP_PATH_TO_SSH_BINARY RSYNC_HOST RSYNC_PORT RSYNC_USER RSYNC_DIRECTORY RSYNC_KEY RSYNC_PASSWORD RETENTION_MODE KEEP_DAILY_DAYS KEEP_WEEKLY_DAYS KEEP_MONTHLY_DAYS KEEP_MIN_SETS RETENTION_REMOTE DELETE_IF_TRANSMITTED HEALTHCHECK_URL STATUS_EMAIL_ADDRESS ALERT_EMAIL_ADDRESS; do
+    for config_var in PROJECT_NAME PROJEKT_BASIS_DATEINAME DEFAULT_SCOPE DB_COUNT MYSQLDUMP_BIN SOURCE_FILES_DIR SFTP_HOST SFTP_PORT SFTP_KEY SFTP_PASSWORD SFTP_USER SFTP_DIRECTORY SFTP_PATH_TO_SSH_BINARY RSYNC_HOST RSYNC_PORT RSYNC_USER RSYNC_DIRECTORY RSYNC_KEY RSYNC_PASSWORD RETENTION_MODE KEEP_DAILY_DAYS KEEP_WEEKLY_DAYS KEEP_MONTHLY_DAYS KEEP_MIN_SETS RETENTION_REMOTE DELETE_IF_TRANSMITTED HEALTHCHECK_URL STATUS_EMAIL_ADDRESS ALERT_EMAIL_ADDRESS; do
         printf -v "$config_var" '%s' ''
     done
     unset SOURCE_FILES_DIR_IGNORE
@@ -281,6 +281,44 @@ function reset_project_config_variables() {
             printf -v "$config_var" '%s' ''
         fi
     done
+}
+
+# Setzt oder aktualisiert einen einzelnen Konfigurationsschlüssel sicher in einer .env-Datei
+function set_env_config_key() {
+    local env_file="$1"
+    local key="$2"
+    local value="$3"
+    [ -f "$env_file" ] || return 1
+
+    local escaped_val
+    escaped_val="$(quote_shell_value "$value")"
+    local tmp_f="${env_file}.tmp.$$"
+
+    grep -v "^${key}=" "$env_file" > "$tmp_f" 2>/dev/null || true
+    printf "%s='%s'\n" "$key" "$escaped_val" >> "$tmp_f"
+    mv "$tmp_f" "$env_file"
+    chmod 600 "$env_file" 2>/dev/null || true
+    return 0
+}
+
+# Gibt eine klar hervorgehobene Schritt-Überschrift auf Konsole und im Log aus
+function print_backup_step() {
+    local step_title="$1"
+    local log_target="${2:-}"
+
+    echo
+    printf "%b--------------------------------------------------%b\n" "${CLR_CYAN}" "${CLR_RESET}"
+    printf "%b[%s]%b\n" "${CLR_CYAN}${CLR_BOLD}" "$step_title" "${CLR_RESET}"
+    printf "%b--------------------------------------------------%b\n" "${CLR_CYAN}" "${CLR_RESET}"
+
+    if [ -n "$log_target" ] && [ -f "$log_target" ]; then
+        {
+            echo ""
+            echo "--------------------------------------------------"
+            echo "[$step_title]"
+            echo "--------------------------------------------------"
+        } >> "$log_target"
+    fi
 }
 
 function normalize_nonnegative_integer() {
@@ -3272,7 +3310,25 @@ function run_pre_backup_checks() {
         check_db_passwords+=("${DB_PASSWORD:-}")
     fi
 
-    if [ "${#check_db_names[@]}" -gt 0 ] && command -v mysql >/dev/null 2>&1; then
+    if [ "${#check_db_names[@]}" -gt 0 ]; then
+        local chk_dump_bin=""
+        chk_dump_bin="$(find_mysqldump_bin || true)"
+        if [ "$chk_dump_bin" = "php-fallback" ]; then
+            log_check_item "OK" "Datenbank-Dump-Werkzeug: Integrierter PHP-Datenbank-Dumper aktiv (MYSQLDUMP_BIN='php-fallback')" "$log_target"
+            check_ok_count=$((check_ok_count + 1))
+        elif [ -n "$chk_dump_bin" ]; then
+            log_check_item "OK" "Datenbank-Dump-Werkzeug verfügbar: '$chk_dump_bin'" "$log_target"
+            check_ok_count=$((check_ok_count + 1))
+        elif php_mysql_available; then
+            log_check_item "WARN" "'mysqldump' / 'mariadb-dump' nicht gefunden – integrierter PHP-Datenbank-Dumper steht als Fallback bereit" "$log_target" "Bei interaktivem Lauf wird eine dauerhafte Aktivierung angeboten."
+            check_warn_count=$((check_warn_count + 1))
+        else
+            log_check_item "ALERT" "Weder 'mysqldump'/'mariadb-dump' noch PHP mit MySQL-Unterstützung gefunden!" "$log_target" "Datenbank-Backups werden mit Exit-Code 127 fehlschlagen."
+            check_alert_count=$((check_alert_count + 1))
+        fi
+    fi
+
+    if [ "${#check_db_names[@]}" -gt 0 ] && { command -v mysql >/dev/null 2>&1 || php_mysql_available; }; then
         for ((chk_d=0; chk_d<${#check_db_names[@]}; chk_d++)); do
             local cur_h="${check_db_hosts[$chk_d]}"
             local cur_n="${check_db_names[$chk_d]}"
@@ -3282,11 +3338,38 @@ function run_pre_backup_checks() {
             local cur_h_clean="${cur_h%%:*}"
             local cur_port="${cur_h#*:}"
             local cur_port_arg=""
-            [ "$cur_port" != "$cur_h" ] && [ -n "$cur_port" ] && cur_port_arg="-P$cur_port"
+            local cur_port_num="3306"
+            if [ "$cur_port" != "$cur_h" ] && [ -n "$cur_port" ]; then
+                cur_port_arg="-P$cur_port"
+                cur_port_num="$cur_port"
+            fi
 
-            local tbl_count
-            tbl_count=$(MYSQL_PWD="$cur_p" mysql -h"$cur_h_clean" $cur_port_arg -u"$cur_u" "$cur_n" --connect-timeout=3 -s -N -e "SELECT count(*) FROM information_schema.tables WHERE table_schema = '$cur_n';" 2>/dev/null)
-            local mysql_ping_status=$?
+            local tbl_count=""
+            local mysql_ping_status=1
+            if command -v mysql >/dev/null 2>&1; then
+                tbl_count=$(MYSQL_PWD="$cur_p" mysql -h"$cur_h_clean" $cur_port_arg -u"$cur_u" "$cur_n" --connect-timeout=3 -s -N -e "SELECT count(*) FROM information_schema.tables WHERE table_schema = '$cur_n';" 2>/dev/null)
+                mysql_ping_status=$?
+            elif php_mysql_available; then
+                tbl_count=$(MYSQL_PWD="$cur_p" PHP_CHK_HOST="$cur_h_clean" PHP_CHK_PORT="$cur_port_num" PHP_CHK_USER="$cur_u" PHP_CHK_DB="$cur_n" php -r '
+                    $h=getenv("PHP_CHK_HOST"); $p=(int)getenv("PHP_CHK_PORT"); $u=getenv("PHP_CHK_USER"); $pw=getenv("MYSQL_PWD"); $d=getenv("PHP_CHK_DB");
+                    if (extension_loaded("mysqli")) {
+                        mysqli_report(MYSQLI_REPORT_OFF);
+                        $m = @new mysqli($h, $u, $pw, $d, $p);
+                        if ($m->connect_errno) exit(1);
+                        $r = $m->query("SELECT count(*) FROM information_schema.tables WHERE table_schema = \"" . $m->real_escape_string($d) . "\"");
+                        if ($r && ($row = $r->fetch_row())) { echo $row[0]; exit(0); }
+                        exit(1);
+                    }
+                    try {
+                        $pdo = new PDO("mysql:host=$h;port=$p;dbname=$d;charset=utf8mb4", $u, $pw, [PDO::ATTR_TIMEOUT => 3]);
+                        $st = $pdo->prepare("SELECT count(*) FROM information_schema.tables WHERE table_schema = ?");
+                        $st->execute([$d]);
+                        echo $st->fetchColumn();
+                        exit(0);
+                    } catch (Throwable $e) { exit(1); }
+                ' 2>/dev/null)
+                mysql_ping_status=$?
+            fi
 
             if [ "$mysql_ping_status" -eq 0 ] && [ -n "$tbl_count" ]; then
                 log_check_item "OK" "Datenbank '$cur_n' auf '$cur_h' erreichbar ($tbl_count Tabellen vorhanden)" "$log_target"
@@ -3866,6 +3949,250 @@ function verify_backup() {
     return 0
 }
 
+# Prüft, ob PHP CLI mit MySQL-Unterstützung (mysqli oder pdo_mysql) verfügbar ist
+function php_mysql_available() {
+    command -v php >/dev/null 2>&1 || return 1
+    php -r 'exit((extension_loaded("mysqli") || extension_loaded("pdo_mysql")) ? 0 : 1);' >/dev/null 2>&1
+}
+
+# Sucht nach einem verfügbaren mysqldump- oder mariadb-dump-Binary (inkl. gängiger Sonderpfade)
+function find_mysqldump_bin() {
+    local configured="${MYSQLDUMP_BIN:-}"
+    if [ "$configured" = "php-fallback" ]; then
+        echo "php-fallback"
+        return 0
+    fi
+    if [ -n "$configured" ] && [ -x "$configured" ]; then
+        echo "$configured"
+        return 0
+    fi
+
+    local cand
+    for cand in mysqldump mariadb-dump; do
+        if command -v "$cand" >/dev/null 2>&1; then
+            command -v "$cand"
+            return 0
+        fi
+    done
+
+    local path_cand
+    for path_cand in \
+        "$basename/bin/mysqldump" \
+        "$basename/bin/mariadb-dump" \
+        "/usr/bin/mysqldump" \
+        "/usr/bin/mariadb-dump" \
+        "/usr/local/bin/mysqldump" \
+        "/usr/local/bin/mariadb-dump" \
+        "/usr/local/mysql/bin/mysqldump" \
+        "/usr/local/mariadb/bin/mariadb-dump" \
+        "/opt/homebrew/opt/mysql-client/bin/mysqldump" \
+        "/opt/homebrew/opt/mariadb-client/bin/mariadb-dump" \
+        "/opt/homebrew/bin/mysqldump" \
+        "/opt/homebrew/bin/mariadb-dump" \
+        /opt/plesk/mysql/*/bin/mysqldump; do
+        if [ -x "$path_cand" ]; then
+            echo "$path_cand"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# Erstellt einen mysqldump-kompatiblen SQL-Dump über PHP (mysqli / PDO_MySQL), falls mysqldump fehlt
+function backup_db_via_php() {
+    local db_host="$1"
+    local db_port="$2"
+    local db_user="$3"
+    local db_password="$4"
+    local db_name="$5"
+    local sql_file="$6"
+    local log_target="$7"
+
+    php_mysql_available || return 127
+
+    MYSQL_PWD="$db_password" \
+    PHP_DUMP_HOST="$db_host" \
+    PHP_DUMP_PORT="${db_port:-3306}" \
+    PHP_DUMP_USER="$db_user" \
+    PHP_DUMP_DB="$db_name" \
+    PHP_DUMP_OUT="$sql_file" \
+    php -r '
+        $host = getenv("PHP_DUMP_HOST");
+        $port = (int)(getenv("PHP_DUMP_PORT") ?: 3306);
+        $user = getenv("PHP_DUMP_USER");
+        $pass = getenv("MYSQL_PWD");
+        $db   = getenv("PHP_DUMP_DB");
+        $out  = getenv("PHP_DUMP_OUT");
+
+        $fh = @fopen($out, "wb");
+        if (!$fh) {
+            fwrite(STDERR, "PHP-Dumper: Zieldatei nicht beschreibbar: $out\n");
+            exit(1);
+        }
+
+        $writeHeader = function($serverVer) use ($fh, $host, $db) {
+            fwrite($fh, "-- MySQL dump (PHP Fallback)\n");
+            fwrite($fh, "-- Host: $host    Database: $db\n");
+            fwrite($fh, "-- Server version: $serverVer\n");
+            fwrite($fh, "-- ------------------------------------------------------\n\n");
+            fwrite($fh, "SET NAMES utf8mb4;\n");
+            fwrite($fh, "SET FOREIGN_KEY_CHECKS=0;\n");
+            fwrite($fh, "SET SQL_MODE='\''NO_AUTO_VALUE_ON_ZERO'\'';\n\n");
+        };
+
+        if (extension_loaded("mysqli")) {
+            mysqli_report(MYSQLI_REPORT_OFF);
+            $mysqli = @new mysqli($host, $user, $pass, $db, $port);
+            if ($mysqli->connect_errno) {
+                fwrite(STDERR, "PHP-Dumper (mysqli) Verbindungsfehler: " . $mysqli->connect_error . "\n");
+                fclose($fh);
+                exit(1);
+            }
+            $mysqli->set_charset("utf8mb4");
+            $writeHeader($mysqli->server_info);
+
+            $tables = [];
+            $views = [];
+            $res = $mysqli->query("SHOW FULL TABLES");
+            if (!$res) {
+                fwrite(STDERR, "PHP-Dumper: SHOW FULL TABLES fehlgeschlagen: " . $mysqli->error . "\n");
+                fclose($fh);
+                exit(1);
+            }
+            while ($row = $res->fetch_row()) {
+                if (isset($row[1]) && strtoupper($row[1]) === "VIEW") {
+                    $views[] = $row[0];
+                } else {
+                    $tables[] = $row[0];
+                }
+            }
+            $res->free();
+
+            foreach ($tables as $tbl) {
+                $qTbl = "`" . str_replace("`", "``", $tbl) . "`";
+                $cr = $mysqli->query("SHOW CREATE TABLE $qTbl");
+                if (!$cr || !($crRow = $cr->fetch_row())) {
+                    fwrite(STDERR, "PHP-Dumper: SHOW CREATE TABLE $qTbl fehlgeschlagen: " . $mysqli->error . "\n");
+                    fclose($fh);
+                    exit(1);
+                }
+                fwrite($fh, "DROP TABLE IF EXISTS $qTbl;\n");
+                fwrite($fh, $crRow[1] . ";\n\n");
+                $cr->free();
+
+                $dataRes = $mysqli->query("SELECT * FROM $qTbl", MYSQLI_USE_RESULT);
+                if (!$dataRes) {
+                    fwrite(STDERR, "PHP-Dumper: SELECT * FROM $qTbl fehlgeschlagen: " . $mysqli->error . "\n");
+                    fclose($fh);
+                    exit(1);
+                }
+                $fields = $dataRes->fetch_fields();
+                $batch = [];
+                $batchBytes = 0;
+                while ($row = $dataRes->fetch_row()) {
+                    $vals = [];
+                    foreach ($row as $idx => $val) {
+                        if ($val === null) {
+                            $vals[] = "NULL";
+                        } else {
+                            $vals[] = "'" . $mysqli->real_escape_string((string)$val) . "'";
+                        }
+                    }
+                    $tuple = "(" . implode(",", $vals) . ")";
+                    $batch[] = $tuple;
+                    $batchBytes += strlen($tuple);
+                    if (count($batch) >= 100 || $batchBytes >= 524288) {
+                        fwrite($fh, "INSERT INTO $qTbl VALUES " . implode(",", $batch) . ";\n");
+                        $batch = [];
+                        $batchBytes = 0;
+                    }
+                }
+                if (count($batch) > 0) {
+                    fwrite($fh, "INSERT INTO $qTbl VALUES " . implode(",", $batch) . ";\n");
+                }
+                fwrite($fh, "\n");
+                $dataRes->free();
+            }
+
+            foreach ($views as $vw) {
+                $qVw = "`" . str_replace("`", "``", $vw) . "`";
+                $cr = $mysqli->query("SHOW CREATE VIEW $qVw");
+                if ($cr && ($crRow = $cr->fetch_row())) {
+                    fwrite($fh, "DROP VIEW IF EXISTS $qVw;\n");
+                    fwrite($fh, $crRow[1] . ";\n\n");
+                }
+                if ($cr) $cr->free();
+            }
+            $mysqli->close();
+        } else {
+            try {
+                $dsn = "mysql:host=$host;port=$port;dbname=$db;charset=utf8mb4";
+                $pdo = new PDO($dsn, $user, $pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+            } catch (Throwable $e) {
+                fwrite(STDERR, "PHP-Dumper (PDO) Verbindungsfehler: " . $e->getMessage() . "\n");
+                fclose($fh);
+                exit(1);
+            }
+            $ver = (string)$pdo->getAttribute(PDO::ATTR_SERVER_VERSION);
+            $writeHeader($ver);
+
+            $tables = [];
+            $views = [];
+            foreach ($pdo->query("SHOW FULL TABLES", PDO::FETCH_NUM) as $row) {
+                if (isset($row[1]) && strtoupper($row[1]) === "VIEW") {
+                    $views[] = $row[0];
+                } else {
+                    $tables[] = $row[0];
+                }
+            }
+
+            foreach ($tables as $tbl) {
+                $qTbl = "`" . str_replace("`", "``", $tbl) . "`";
+                $crRow = $pdo->query("SHOW CREATE TABLE $qTbl", PDO::FETCH_NUM)->fetch();
+                fwrite($fh, "DROP TABLE IF EXISTS $qTbl;\n");
+                fwrite($fh, $crRow[1] . ";\n\n");
+
+                $stmt = $pdo->query("SELECT * FROM $qTbl", PDO::FETCH_NUM);
+                $batch = [];
+                $batchBytes = 0;
+                while ($row = $stmt->fetch()) {
+                    $vals = [];
+                    foreach ($row as $val) {
+                        $vals[] = ($val === null) ? "NULL" : $pdo->quote((string)$val);
+                    }
+                    $tuple = "(" . implode(",", $vals) . ")";
+                    $batch[] = $tuple;
+                    $batchBytes += strlen($tuple);
+                    if (count($batch) >= 100 || $batchBytes >= 524288) {
+                        fwrite($fh, "INSERT INTO $qTbl VALUES " . implode(",", $batch) . ";\n");
+                        $batch = [];
+                        $batchBytes = 0;
+                    }
+                }
+                if (count($batch) > 0) {
+                    fwrite($fh, "INSERT INTO $qTbl VALUES " . implode(",", $batch) . ";\n");
+                }
+                fwrite($fh, "\n");
+            }
+
+            foreach ($views as $vw) {
+                $qVw = "`" . str_replace("`", "``", $vw) . "`";
+                $crRow = $pdo->query("SHOW CREATE VIEW $qVw", PDO::FETCH_NUM)->fetch();
+                if ($crRow) {
+                    fwrite($fh, "DROP VIEW IF EXISTS $qVw;\n");
+                    fwrite($fh, $crRow[1] . ";\n\n");
+                }
+            }
+        }
+
+        fwrite($fh, "SET FOREIGN_KEY_CHECKS=1;\n");
+        fwrite($fh, "-- Dump completed on " . date("Y-m-d H:i:s") . "\n");
+        fclose($fh);
+        exit(0);
+    ' 2>> "$log_target"
+}
+
 ## Funktionen
 # backup db
 #  parameter1: db_host
@@ -3879,6 +4206,7 @@ function backup_db() {
     local db_user=$3
     local db_password=$4
     local run_ts="${5:-${backup_run_timestamp:-$(date +%Y-%m-%d_%H-%M-%S)}}"
+    local env_file_ref="${6:-}"
     local db_dateiname="$backup_destiantion$projekt_basis_dateiname"'_'"$run_ts"'_'"$db_name"
     local sql_file="$db_dateiname$db_dateiendung"
 
@@ -3888,41 +4216,121 @@ function backup_db() {
     if [ "$db_name" != "" ]
     then
         echo "Sichern der Datenbank '$db_name' in Datei $sql_file ..." | tee -a "$log_file_name"
-        
-        local mysqldump_opts=(
-            "--single-transaction"
-            "--quick"
-            "--routines"
-            "--triggers"
-            "--skip-lock-tables"
-            "--max_allowed_packet=512M"
-            "--default-character-set=utf8mb4"
-        )
-
-        # Optionale Flags prüfen (MySQL 8 / Cloud DB Kompatibilität)
-        local mysqldump_help
-        mysqldump_help="$(mysqldump --help 2>&1 || true)"
-        if [[ "$mysqldump_help" == *"--column-statistics"* ]]; then
-            mysqldump_opts+=("--column-statistics=0")
-        fi
-        if [[ "$mysqldump_help" == *"--set-gtid-purged"* ]]; then
-            mysqldump_opts+=("--set-gtid-purged=OFF")
-        fi
 
         local db_host_clean="${db_host%%:*}"
         local db_port="${db_host#*:}"
         local port_arg=""
+        local db_port_num="3306"
         if [ "$db_port" != "$db_host" ] && [ -n "$db_port" ]; then
             port_arg="-P$db_port"
+            db_port_num="$db_port"
         fi
 
-        MYSQL_PWD="$db_password" mysqldump \
-            "${mysqldump_opts[@]}" \
-            -h"$db_host_clean" \
-            $port_arg \
-            -u"$db_user" \
-            "$db_name" > "$sql_file" 2>> "$log_file_name"
-        local dump_status=$?
+        local dump_bin=""
+        dump_bin="$(find_mysqldump_bin || true)"
+        local dump_status=127
+
+        if [ "$dump_bin" = "php-fallback" ]; then
+            echo "  -> Verwende integrierten PHP-Datenbank-Dumper (MYSQLDUMP_BIN='php-fallback')." | tee -a "$log_file_name"
+            backup_db_via_php "$db_host_clean" "$db_port_num" "$db_user" "$db_password" "$db_name" "$sql_file" "$log_file_name"
+            dump_status=$?
+        elif [ -n "$dump_bin" ]; then
+            local mysqldump_opts=(
+                "--single-transaction"
+                "--quick"
+                "--routines"
+                "--triggers"
+                "--skip-lock-tables"
+                "--max_allowed_packet=512M"
+                "--default-character-set=utf8mb4"
+            )
+
+            # Optionale Flags prüfen (MySQL 8 / Cloud DB Kompatibilität)
+            local mysqldump_help
+            mysqldump_help="$("$dump_bin" --help 2>&1 || true)"
+            if [[ "$mysqldump_help" == *"--column-statistics"* ]]; then
+                mysqldump_opts+=("--column-statistics=0")
+            fi
+            if [[ "$mysqldump_help" == *"--set-gtid-purged"* ]]; then
+                mysqldump_opts+=("--set-gtid-purged=OFF")
+            fi
+
+            MYSQL_PWD="$db_password" "$dump_bin" \
+                "${mysqldump_opts[@]}" \
+                -h"$db_host_clean" \
+                $port_arg \
+                -u"$db_user" \
+                "$db_name" > "$sql_file" 2>> "$log_file_name"
+            dump_status=$?
+        fi
+
+        # Diagnose & interaktive/automatische Behebung bei Exit-Code 127 (mysqldump nicht gefunden)
+        if [ "$dump_status" -eq 127 ] || [ -z "$dump_bin" ]; then
+            echo | tee -a "$log_file_name" >&2
+            printf "%bFEHLER: mysqldump / mariadb-dump wurde auf diesem System nicht gefunden (Exit-Code: 127)!%b\n" "${CLR_RED}${CLR_BOLD}" "${CLR_RESET}" >&2
+            echo "FEHLER: mysqldump / mariadb-dump wurde auf diesem System nicht gefunden (Exit-Code: 127)!" >> "$log_file_name"
+            echo "  Ursache: Auf diesem Server ist kein MySQL/MariaDB-Client im Suchpfad installiert." | tee -a "$log_file_name" >&2
+
+            if [ -t 0 ] && [ "$cli_json" != "true" ] && [ "$cli_quiet" != "true" ]; then
+                echo
+                echo "Möchten Sie das Problem direkt beheben?"
+                if php_mysql_available; then
+                    echo "  1) Integrierten PHP-Datenbank-Dumper aktivieren & in Projekt-Konfiguration speichern (empfohlen)"
+                    echo "  2) Integrierten PHP-Datenbank-Dumper nur für diesen Lauf verwenden"
+                    echo "  3) Eigenen Pfad zu mysqldump/mariadb-dump eingeben"
+                    echo "  0) Abbrechen"
+                    read -rp "Auswahl [1]: " mysql_fix_choice
+                    mysql_fix_choice="${mysql_fix_choice:-1}"
+                else
+                    echo "  3) Eigenen Pfad zu mysqldump/mariadb-dump eingeben"
+                    echo "  0) Abbrechen (Hinweis: Paket 'mariadb-client' oder 'mysql-client' installieren)"
+                    read -rp "Auswahl [0]: " mysql_fix_choice
+                    mysql_fix_choice="${mysql_fix_choice:-0}"
+                fi
+
+                case "$mysql_fix_choice" in
+                    1|2)
+                        if php_mysql_available; then
+                            if [ "$mysql_fix_choice" = "1" ] && [ -n "$env_file_ref" ] && [ -f "$env_file_ref" ]; then
+                                set_env_config_key "$env_file_ref" "MYSQLDUMP_BIN" "php-fallback"
+                                MYSQLDUMP_BIN="php-fallback"
+                                echo "  -> MYSQLDUMP_BIN='php-fallback' in '$env_file_ref' gespeichert." | tee -a "$log_file_name"
+                            else
+                                MYSQLDUMP_BIN="php-fallback"
+                            fi
+                            echo "  -> Starte Datenbank-Sicherung über PHP-Fallback ..." | tee -a "$log_file_name"
+                            backup_db_via_php "$db_host_clean" "$db_port_num" "$db_user" "$db_password" "$db_name" "$sql_file" "$log_file_name"
+                            dump_status=$?
+                        fi
+                        ;;
+                    3)
+                        read -rp "Vollständiger Pfad zu mysqldump/mariadb-dump: " custom_dump_bin
+                        if [ -n "$custom_dump_bin" ] && [ -x "$custom_dump_bin" ]; then
+                            MYSQLDUMP_BIN="$custom_dump_bin"
+                            if [ -n "$env_file_ref" ] && [ -f "$env_file_ref" ]; then
+                                read -rp "Pfad dauerhaft in '$env_file_ref' speichern? (J/n): " save_custom_bin
+                                if [ -z "$save_custom_bin" ] || [[ "$save_custom_bin" =~ ^[JjYy]$ ]]; then
+                                    set_env_config_key "$env_file_ref" "MYSQLDUMP_BIN" "$custom_dump_bin"
+                                fi
+                            fi
+                            local c_opts=("--single-transaction" "--quick" "--routines" "--triggers" "--skip-lock-tables" "--max_allowed_packet=512M" "--default-character-set=utf8mb4")
+                            local c_help
+                            c_help="$("$custom_dump_bin" --help 2>&1 || true)"
+                            [[ "$c_help" == *"--column-statistics"* ]] && c_opts+=("--column-statistics=0")
+                            [[ "$c_help" == *"--set-gtid-purged"* ]] && c_opts+=("--set-gtid-purged=OFF")
+                            MYSQL_PWD="$db_password" "$custom_dump_bin" "${c_opts[@]}" -h"$db_host_clean" $port_arg -u"$db_user" "$db_name" > "$sql_file" 2>> "$log_file_name"
+                            dump_status=$?
+                        else
+                            echo "  [FEHLER] '$custom_dump_bin' existiert nicht oder ist nicht ausführbar." | tee -a "$log_file_name" >&2
+                        fi
+                        ;;
+                esac
+            elif php_mysql_available; then
+                echo "  -> Nicht-interaktiver Modus: Weiche automatisch auf integrierten PHP-Datenbank-Dumper aus ..." | tee -a "$log_file_name"
+                backup_db_via_php "$db_host_clean" "$db_port_num" "$db_user" "$db_password" "$db_name" "$sql_file" "$log_file_name"
+                dump_status=$?
+            fi
+        fi
 
         if [ "$dump_status" -ne 0 ] || [ ! -s "$sql_file" ]; then
             echo "FEHLER: mysqldump für '$db_name' auf '$db_host' fehlgeschlagen (Exit-Code: $dump_status)!" | tee -a "$log_file_name" >&2
@@ -4150,12 +4558,13 @@ function run_backup_for_project() {
     fi
 
     # Datenbanken sichern (beliebig viele), nur wenn Umfang alles oder db
+    print_backup_step "Schritt 2: Datenbank-Sicherung" "$log_file_name"
     if [ "$run_scope" == "alles" ] || [ "$run_scope" == "db" ]; then
         if [ "${#db_names[@]}" -gt 0 ]; then
             for ((db_backup_i=0; db_backup_i<${#db_names[@]}; db_backup_i++))
             do
                 local current_db_name="${db_names[$db_backup_i]}"
-                backup_db "${db_hosts[$db_backup_i]}" "$current_db_name" "${db_users[$db_backup_i]}" "${db_passwords[$db_backup_i]}" "$backup_run_timestamp"
+                backup_db "${db_hosts[$db_backup_i]}" "$current_db_name" "${db_users[$db_backup_i]}" "${db_passwords[$db_backup_i]}" "$backup_run_timestamp" "$project_env_file"
                 local db_backup_status=$?
 
                 if [ "$db_backup_status" -eq 2 ] || [ -z "$created_db_dump_file" ] || [ ! -f "$created_db_dump_file" ]; then
@@ -4203,14 +4612,17 @@ function run_backup_for_project() {
                         project_exitcode=2
                     fi
                 fi
+                echo | tee -a "$log_file_name"
             done
+        else
+            echo "Keine Datenbanken konfiguriert - Datenbank-Sicherung wird übersprungen." | tee -a "$log_file_name"
         fi
     else
         echo "Umfang '$run_scope' - Datenbank-Sicherung wird übersprungen." | tee -a "$log_file_name"
-        echo | tee -a "$log_file_name"
     fi
 
     # Dateien zippen, nur wenn Umfang alles oder dateien
+    print_backup_step "Schritt 3: Datei-Sicherung (ZIP)" "$log_file_name"
     if [ "$run_scope" == "alles" ] || [ "$run_scope" == "dateien" ]; then
         if [ "$source_files_dir" != "" ]
         then
@@ -4287,7 +4699,10 @@ function run_backup_for_project() {
         echo | tee -a "$log_file_name"
     fi
 
-    # Dateien per rsync synchronisieren (rsync)
+    # Dateien per rsync synchronisieren / per sftp übertragen
+    if [ "$rsync_host" != "" ] || [ "$sftp_host" != "" ]; then
+        print_backup_step "Schritt 4: Externe Übertragung" "$log_file_name"
+    fi
     if [ "$rsync_host" != "" ]
     then
         transmitted_method="rsync"
@@ -4404,6 +4819,7 @@ function run_backup_for_project() {
     # Dateien löschen, wenn erfolgreich übermittelt wurde (Prüfung lief vorher)
     if [ "$delete_if_transmitted" == "true" ] && [ "$transmitted" == "true" ] && [ "$transmitted_ok" == "true" ] && [ "$project_exitcode" -lt 2 ]
     then
+        print_backup_step "Schritt 5: Lokale Bereinigung nach Übertragung" "$log_file_name"
         echo "Dateien in $backup_destiantion werden nach erfolgreicher Übertragung gelöscht ..." | tee -a "$log_file_name"
         if [ -n "$backup_destiantion" ] && [ -d "$backup_destiantion" ]; then
             find "$backup_destiantion" -maxdepth 1 -type f ! -name '.htaccess' -delete -print | tee -a "$log_file_name"
@@ -4415,6 +4831,7 @@ function run_backup_for_project() {
     fi
 
     # Aufbewahrungsregeln (Retention / Großvater-Vater-Sohn) ausführen
+    print_backup_step "Schritt 6: Aufbewahrungsregeln (Retention)" "$log_file_name"
     local ret_mode="${RETENTION_MODE:-aus}"
 
     if [ "$ret_mode" != "staffel" ]; then

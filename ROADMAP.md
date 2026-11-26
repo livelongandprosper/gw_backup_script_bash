@@ -164,12 +164,22 @@ Verlässliche, automatisierte Erkennung von Backup-Erfolgen und -Fehlern ohne ze
 
 ---
 
-### Etappe 2: Sichere Ablage auf Hetzner Storage Box (Briefkasten-Prinzip)
+### Etappe 2: Sichere Ablage auf Hetzner Storage Box & GVS-Aufbewahrungsrichtlinie
+*Status: GVS-Aufbewahrungsrichtlinie umgesetzt (v2.3.0); Storage-Box-Schlüsselassistent offen*
 
 #### Ziel & Nutzen
-Isolierte, manipulationssichere Offsite-Sicherung pro Kunde/Projekt auf Hetzner Storage Boxen mit ZFS-Snapshot-Schutz gegen Löschung und Ransomware.
+Isolierte, manipulationssichere Offsite-Sicherung pro Kunde/Projekt auf Hetzner Storage Boxen mit ZFS-Snapshot-Schutz gegen Löschung und intelligenter Großvater-Vater-Sohn-Aufbewahrungsrichtlinie (GVS / Staffel-Prinzip) für lokale und entfernte Speicherziele.
 
 #### Aufgaben-Checkliste
+- [x] **Großvater-Vater-Sohn-Aufbewahrungsrichtlinie (GVS / Staffel-Prinzip) umsetzen:**
+  - Konfigurierbare Staffelung in `.env.<projekt>`: Täglich (`KEEP_DAILY_DAYS=30`), Wöchentlich (`KEEP_WEEKLY_DAYS=90`), Monatlich (`KEEP_MONTHLY_DAYS=365`).
+  - Garantierter Mindestbestand (`KEEP_MIN_SETS=3`) schützt jüngste erfolgreiche Sätze unabhängig vom Alter.
+  - Atomare Satzbildung (DB-Dumps + Datei-ZIP mit identischem Laufzeitstempel `BACKUP_RUN_TIMESTAMP`).
+  - Remote-Aufräumen via SFTP-Batch (`RETENTION_REMOTE='yes'`, auch für Rsync-Ziele).
+  - Strikte Sicherheitsbarrieren: Löschverbot bei Fehlern (Exitcode 2) oder fehlgeschlagener Selbstprüfung; Schutz fremder Dateien.
+  - CLI-Dry-Run (`--retention-dry-run [--project=<name>|alle]`) und interaktiver Menüpunkt mit automatischer `.env.<projekt>.bak`-Sicherung.
+  - Maschinenlesbares Status-JSON (`status/<PROJEKT>.last.json`) mit `retention`-Objekt.
+  - Vollständige Abwärtskompatibilität für bestehende Installationen ohne `RETENTION_MODE`.
 - [ ] **Sicherheitskonzept für Storage-Box-Unterkonten umsetzen:**
   - Verwendung dedizierter Unterkonten pro Projekt/Kunde (kein Hauptaccount-Zugriff vom Webserver).
   - Begrenzung der Zugriffsrechte des Unterkontos auf das projekteigene Verzeichnis.

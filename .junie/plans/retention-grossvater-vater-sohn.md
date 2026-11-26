@@ -222,7 +222,7 @@ Ergebnis: Der Backup-Lauf führt die Aufbewahrungsregeln nach erfolgreicher Veri
 - Setup-Assistent (`run_setup_assistant`) und `write_project_env_file` um `RETENTION_MODE='staffel'`, `KEEP_DAILY_DAYS=30`, `KEEP_WEEKLY_DAYS=90`, `KEEP_MONTHLY_DAYS=365`, `KEEP_MIN_SETS=3`, `RETENTION_REMOTE='yes'` erweitern.
 - `.env.example` aktualisieren und Abwärtskompatibilität für bestehende `.env`-Dateien (`tage` bei `BACKUP_LIVE_TIME > 0`, sonst `aus`) garantieren.
 
-### * Step 4: Dry-Run, Hauptmenü-Steuerung, Tests und Dokumentation
+### ✓ Step 4: Dry-Run, Hauptmenü-Steuerung, Tests und Dokumentation
 Ergebnis: Dry-Run-Funktionalität auf CLI- und Menüebene verfügbar, Migration bestehender Projekte möglich, Testsuite und Dokumentation vollständig.
 
 - CLI-Parameter `--retention-dry-run [--project=<name>|alle]` implementieren mit tabellarischer Ausgabe (Datum, Typ, Größe, Entscheidung, Grund, freiwerdender Speicherplatz lokal/remote).

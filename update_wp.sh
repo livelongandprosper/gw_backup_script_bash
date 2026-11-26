@@ -742,6 +742,35 @@ function flush_wordpress_caches() {
     fi
 }
 
+# Löscht WordPress-Update-Transients und stößt eine frische Update-Ermittlung an
+function refresh_wordpress_update_transients() {
+    local wp_path="$1"
+    local log_target="${2:-}"
+    local php_code='delete_site_transient("update_core"); delete_site_transient("update_plugins"); delete_site_transient("update_themes"); if (function_exists("wp_version_check")) { wp_version_check(array(), true); } if (function_exists("wp_update_plugins")) { wp_update_plugins(); } if (function_exists("wp_update_themes")) { wp_update_themes(); }'
+
+    local refresh_ok="false"
+    if [ -n "$log_target" ]; then
+        if run_wp eval "$php_code" --path="$wp_path" 2>&1 | tee -a "$log_target"; then
+            refresh_ok="true"
+        elif run_wp eval "$php_code" --path="$wp_path" --skip-plugins --skip-themes 2>&1 | tee -a "$log_target"; then
+            refresh_ok="true"
+        fi
+    else
+        if run_wp eval "$php_code" --path="$wp_path"; then
+            refresh_ok="true"
+        elif run_wp eval "$php_code" --path="$wp_path" --skip-plugins --skip-themes; then
+            refresh_ok="true"
+        fi
+    fi
+
+    if [ "$refresh_ok" = "true" ]; then
+        log_check_item "OK" "Verfügbare WordPress-Updates frisch ermittelt (Update-Transients aktualisiert)" "$log_target"
+    else
+        log_check_item "WARN" "Frische Update-Ermittlung lieferte eine Warnung – fahre mit vorhandenen Update-Daten fort" "$log_target"
+    fi
+    return 0
+}
+
 ################################
 ################################
 ################################
@@ -2124,6 +2153,9 @@ function run_update_for_project() {
         echo "==================================================" | tee -a "$run_log"
         echo "DRY-RUN: Verfügbare Updates für '$project_name'" | tee -a "$run_log"
         echo "==================================================" | tee -a "$run_log"
+        echo "Aktualisiere Update-Cache (frische Prüfung) ..." | tee -a "$run_log"
+        refresh_wordpress_update_transients "$resolved_wp_path" "$run_log"
+        echo | tee -a "$run_log"
         echo "WordPress Core:" | tee -a "$run_log"
         run_wp core check-update --path="$resolved_wp_path" --skip-plugins --skip-themes 2>&1 | tee -a "$run_log" || true
         echo | tee -a "$run_log"
@@ -2336,6 +2368,9 @@ function run_update_for_project() {
     echo "Führe WordPress-Updates durch ..." | tee -a "$run_log"
     echo "==================================================" | tee -a "$run_log"
 
+    echo "Vorab: Verfügbare Updates frisch ermitteln ..." | tee -a "$run_log"
+    refresh_wordpress_update_transients "$resolved_wp_path" "$run_log"
+
     local do_core="true"
     local do_plugins="true"
     local do_themes="true"
@@ -2434,6 +2469,10 @@ function run_update_for_project() {
     # Caches leeren (Objekt-Cache + erkannte Cache-Plugins wie WP Rocket / WP Fastest Cache)
     echo "6/6: Vorhandene Caches leeren ..." | tee -a "$run_log"
     flush_wordpress_caches "$resolved_wp_path" "$run_log"
+
+    # Update-Transients nach Abschluss erneut frisch abfragen, damit das Backend denselben Stand zeigt
+    echo "Update-Status im WordPress-Backend aktualisieren ..." | tee -a "$run_log"
+    refresh_wordpress_update_transients "$resolved_wp_path" "$run_log"
 
     # 8. Prüfung nachher (Post-Check)
     echo

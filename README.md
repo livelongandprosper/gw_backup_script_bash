@@ -106,7 +106,7 @@ Skript zur sicheren Durchführung von WordPress Core-, Plugin-, Theme- und Sprac
   3. **Backup-Pflicht**: Führt vor dem Update `./backup_full_db_files_zip.sh --project=<name> --scope=alles --json` aus. Fortsetzung nur bei Exitcode 0 oder 1 (mit verifizierten Dateien). Bei `--no-backup` wird ein vorhandenes Backup verlangt, das jünger als `BACKUP_MAX_AGE_MIN` (Standard: 60 Min) und Status "ok" ist
   4. **Stand vorher sichern**: Core-Version, Plugin-/Theme-Listen (`--format=json`), Zeilenzahlen der Logs, HTTP-Antwortzeiten sowie HTML-Kopien aller `CHECK_PATHS` (`html/vorher_<slug>.html`) werden in `update-runs/<projekt>/<datum>/` archiviert
   5. **Vorher-Screenshots**: Erstellt Desktop- und Mobile-Screenshots aller `SCREENSHOT_PATHS` über Gotenberg 9
-  6. **Updates**: Core, Core-DB, Plugins (unter Ausschluss von `SKIP_PLUGINS`), Themes, Sprachen und anschließende Cache-Leerung (`wp cache flush` sowie bei vorhandenen Plugins automatisch `wp rocket clean --confirm` für WP Rocket und `wp fastest-cache clear all and minified` für WP Fastest Cache). Ein Einzelfehler stoppt Folgeschritte nicht
+  6. **Updates**: Vorab frische Ermittlung verfügbarer Updates (Löschen und Neuabruf der Update-Transients `update_core`, `update_plugins`, `update_themes` – auch im `--dry-run`), anschließend Core, Core-DB, Plugins (unter Ausschluss von `SKIP_PLUGINS`), Themes, Sprachen, Cache-Leerung (`wp cache flush` sowie automatisch `wp rocket clean --confirm` für WP Rocket und `wp fastest-cache clear all and minified` für WP Fastest Cache) und abschließender Transient-Refresh für einen aktuellen Backend-Stand. Ein Einzelfehler stoppt Folgeschritte nicht
   7. **Nachprüfung (Post-Check)**:
      - `wp core verify-checksums`
      - Plugin- und Theme-Versionsdiff

@@ -56,6 +56,8 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
   - `print_backup_step()` hebt die einzelnen Backup-Phasen (`Schritt 2: Datenbank-Sicherung`, `Schritt 3: Datei-Sicherung (ZIP)`, `Schritt 4: Externe Übertragung`, `Schritt 5: Lokale Bereinigung nach Übertragung`, `Schritt 6: Aufbewahrungsregeln (Retention)`) visuell mit Abständen und Trennern auf Konsole und im Log hervor.
 - **Automatische Cache-Plugin-Leerung nach Updates (`update_wp.sh`):**
   - Neue Funktion `flush_wordpress_caches()` leert nach Updates (vor dem Post-Check) sowie im generierten `rollback.sh` neben dem WordPress-Objekt-Cache (`wp cache flush`) automatisch vorhandene Page-Caches via WP-CLI (`wp cli has-command`): WP Rocket (`wp rocket clean --confirm`) und WP Fastest Cache (`wp fastest-cache clear all and minified`, mit Fallback auf `clear all`).
+- **Frische Update-Ermittlung vor & nach Updates (`update_wp.sh`):**
+  - Neue Funktion `refresh_wordpress_update_transients()` löscht vor dem Dry-Run, vor der Update-Ausführung sowie nach dem Cache-Flush die zwischengespeicherten WordPress-Update-Transients (`update_core`, `update_plugins`, `update_themes`) und stößt `wp_version_check()`, `wp_update_plugins()` und `wp_update_themes()` frisch an (mit `--skip-plugins --skip-themes`-Fallback bei Plugin-Fehlern), damit keine veralteten 12-Stunden-Caches genutzt werden und das Backend unmittelbar den aktuellen Stand anzeigt.
 
 ### Entfernt
 - **`sshpass`-Abhängigkeit entfernt (`backup_full_db_files_zip.sh`, `README.md`):**

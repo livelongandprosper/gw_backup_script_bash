@@ -1105,6 +1105,119 @@ function show_ssh_public_key() {
     echo "  3) Standard-SSH-Server (von diesem Server aus per ssh-copy-id):"
     echo "     ssh-copy-id -p $effective_port -i \"$pub_path\" \"$target_conn\""
     echo
+    echo "  4) Per SFTP mit Passwort (wenn kein direkter SSH-Login / Web-UI-Key-Feld möglich ist):"
+    echo "     Im Assistenten oder Hauptmenü Punkt 10 direkt auswählbar (lädt RFC4716 + OpenSSH nach .ssh/authorized_keys hoch)."
+    echo
+    return 0
+}
+
+# Lädt den öffentlichen SSH-Key per SFTP (mit Passwortabfrage) nach .ssh/authorized_keys hoch.
+# Schreibt sowohl das RFC4716-Format (für Hetzner Port 22) als auch OpenSSH (für Port 23 / Standard-SSH),
+# ohne bestehende Einträge in .ssh/authorized_keys zu überschreiben.
+function upload_ssh_key_via_sftp() {
+    local key_path="$1"
+    local remote_host="${2:-}"
+    local remote_port="${3:-22}"
+    local remote_user="${4:-}"
+    local ssh_bin="${5:-}"
+    local pub_path="${key_path}.pub"
+
+    if [ ! -f "$pub_path" ]; then
+        echo "FEHLER: Öffentlicher SSH-Key '$pub_path' wurde nicht gefunden." >&2
+        return 1
+    fi
+    if ! command -v sftp >/dev/null 2>&1; then
+        echo "FEHLER: 'sftp' ist auf diesem System nicht verfügbar." >&2
+        return 1
+    fi
+
+    if [ -z "$remote_host" ]; then
+        read -rp "SFTP Ziel-Host (z. B. <user>.your-storagebox.de): " remote_host
+    fi
+    if [ -z "$remote_host" ]; then
+        echo "Abbruch: Kein Ziel-Host angegeben." >&2
+        return 1
+    fi
+    if [ -z "$remote_port" ]; then
+        read -rp "SFTP Port [22]: " remote_port
+        remote_port="${remote_port:-22}"
+    fi
+    if [ -z "$remote_user" ]; then
+        read -rp "SFTP Benutzername: " remote_user
+    fi
+    if [ -z "$remote_user" ]; then
+        echo "Abbruch: Kein Benutzername angegeben." >&2
+        return 1
+    fi
+
+    local tmp_sftp_dir
+    tmp_sftp_dir="$(mktemp -d 2>/dev/null || mktemp -d -t 'sftpkey')"
+    chmod 700 "$tmp_sftp_dir" 2>/dev/null || true
+
+    local local_auth_file="$tmp_sftp_dir/authorized_keys"
+    local append_script="$tmp_sftp_dir/append_key.sh"
+    local pub_key_b64
+    pub_key_b64="$(awk '{print $2}' "$pub_path" | tr -d '\r\n')"
+    local rfc_file="$tmp_sftp_dir/key_rfc4716.pub"
+    if command -v ssh-keygen >/dev/null 2>&1; then
+        ssh-keygen -e -f "$pub_path" > "$rfc_file" 2>/dev/null || rm -f "$rfc_file"
+    fi
+
+    cat > "$append_script" <<EOF
+#!/bin/bash
+AUTH_FILE="$local_auth_file"
+PUB_FILE="$pub_path"
+RFC_FILE="$rfc_file"
+KEY_B64="$pub_key_b64"
+touch "\$AUTH_FILE"
+chmod 600 "\$AUTH_FILE" 2>/dev/null || true
+if [ -n "\$KEY_B64" ] && grep -F -q "\$KEY_B64" "\$AUTH_FILE" 2>/dev/null; then
+    echo "-> Hinweis: SSH-Key ist bereits in .ssh/authorized_keys vorhanden."
+    exit 0
+fi
+if [ -s "\$AUTH_FILE" ]; then
+    tail -c 1 "\$AUTH_FILE" | read -r _ || printf '\\n' >> "\$AUTH_FILE"
+fi
+if [ -f "\$RFC_FILE" ] && [ -s "\$RFC_FILE" ]; then
+    cat "\$RFC_FILE" >> "\$AUTH_FILE"
+fi
+cat "\$PUB_FILE" >> "\$AUTH_FILE"
+EOF
+    chmod 700 "$append_script"
+
+    echo
+    echo "Verbinde per SFTP mit '$remote_user@$remote_host' (Port $remote_port) ..."
+    echo "Bitte jetzt das SFTP-Passwort eingeben (Eingabe bleibt unsichtbar):"
+
+    local sftp_cmd_status=0
+    sftp -P "$remote_port" ${ssh_bin:+-S "$ssh_bin"} -o "PubkeyAuthentication=no" -o "ConnectTimeout=15" -o "StrictHostKeyChecking=accept-new" "$remote_user@$remote_host" <<EOF
+mkdir .ssh
+chmod 700 .ssh
+get .ssh/authorized_keys $local_auth_file
+!$append_script
+put $local_auth_file .ssh/authorized_keys
+chmod 600 .ssh/authorized_keys
+bye
+EOF
+    sftp_cmd_status=$?
+
+    rm -rf "$tmp_sftp_dir"
+
+    if [ "$sftp_cmd_status" -ne 0 ]; then
+        echo "FEHLER: SFTP-Übertragung des SSH-Keys fehlgeschlagen (Exit-Code: $sftp_cmd_status)." >&2
+        return 1
+    fi
+
+    echo "-> Öffentlicher SSH-Key erfolgreich per SFTP in '.ssh/authorized_keys' hinterlegt."
+
+    if [ -f "$key_path" ]; then
+        if sftp -P "$remote_port" ${ssh_bin:+-S "$ssh_bin"} -o "PubkeyAuthentication=yes" -o "IdentityFile=$key_path" -o "BatchMode=yes" -o "ConnectTimeout=15" -o "StrictHostKeyChecking=accept-new" "$remote_user@$remote_host" <<< "bye" >/dev/null 2>&1; then
+            echo "  [✓ OK] Passwortloser SFTP-Login mit '$key_path' erfolgreich verifiziert!"
+        else
+            echo "  [⚠ WARNUNG] Key wurde hochgeladen, aber der sofortige Key-Test auf Port $remote_port schlug fehl (bei Hetzner ggf. Port 22/23 oder 'Externe Erreichbarkeit' prüfen)." >&2
+        fi
+    fi
+
     return 0
 }
 
@@ -1153,6 +1266,10 @@ function generate_backup_ssh_key() {
 
     echo "-> Neuer SSH-Key erfolgreich erstellt: $target_key_path"
     show_ssh_public_key "$target_key_path" "$remote_host" "$remote_port" "$remote_user" || true
+    read -rp "Öffentlichen SSH-Key jetzt direkt per SFTP (mit Passwort) hinterlegen? (j/N): " upload_sftp_choice
+    if [[ "$upload_sftp_choice" =~ ^[jJyY]$ ]]; then
+        upload_ssh_key_via_sftp "$target_key_path" "$remote_host" "$remote_port" "$remote_user" || true
+    fi
     return 0
 }
 
@@ -1182,10 +1299,19 @@ function prompt_ssh_key_setup() {
             1)
                 SELECTED_SSH_KEY_PATH="$effective_key"
                 if [ -f "${effective_key}.pub" ]; then
-                    read -rp "Öffentlichen SSH-Key (.pub) zum Hinterlegen anzeigen? (j/N): " show_pub_choice
-                    if [[ "$show_pub_choice" =~ ^[jJyY]$ ]]; then
-                        show_ssh_public_key "$effective_key" "$remote_host" "$remote_port" "$remote_user" || true
-                    fi
+                    read -rp "Öffentlichen SSH-Key anzeigen oder per SFTP hinterlegen? (a=anzeigen, s=per SFTP hinterlegen, N=nein): " show_pub_choice
+                    case "$show_pub_choice" in
+                        [aA])
+                            show_ssh_public_key "$effective_key" "$remote_host" "$remote_port" "$remote_user" || true
+                            read -rp "Öffentlichen SSH-Key jetzt direkt per SFTP (mit Passwort) hinterlegen? (j/N): " upload_sftp_choice
+                            if [[ "$upload_sftp_choice" =~ ^[jJyY]$ ]]; then
+                                upload_ssh_key_via_sftp "$effective_key" "$remote_host" "$remote_port" "$remote_user" || true
+                            fi
+                            ;;
+                        [sS])
+                            upload_ssh_key_via_sftp "$effective_key" "$remote_host" "$remote_port" "$remote_user" || true
+                            ;;
+                    esac
                 fi
                 ;;
             2)
@@ -3287,7 +3413,7 @@ function run_main_menu() {
         echo "  7) Projekt-Datengröße anzeigen"
         echo "  8) Projektübersicht anzeigen"
         echo "  9) Aufbewahrung prüfen / einstellen (Staffel/GVS)"
-        echo " 10) SSH-Key generieren / Public Key anzeigen"
+        echo " 10) SSH-Key generieren / anzeigen / per SFTP hinterlegen"
         echo "  0) Beenden"
         echo "======================================"
         read -rp "Auswahl: " menu_choice
@@ -3359,10 +3485,19 @@ function run_main_menu() {
                 local menu_ssh_key="$basename/.ssh/id_ed25519_backup"
                 if [ -f "$menu_ssh_key" ]; then
                     show_ssh_public_key "$menu_ssh_key" || true
-                    read -rp "Neuen SSH-Key generieren (überschreibt vorhandenen)? (j/N): " regen_choice
-                    if [[ "$regen_choice" =~ ^[jJyY]$ ]]; then
-                        generate_backup_ssh_key "$menu_ssh_key"
-                    fi
+                    echo "Aktion wählen:"
+                    echo "  1) Öffentlichen SSH-Key per SFTP (mit Passwort) auf Zielserver hinterlegen"
+                    echo "  2) Neuen SSH-Key generieren (überschreibt vorhandenen)"
+                    echo "  0) Zurück zum Hauptmenü"
+                    read -rp "Auswahl [0]: " key_action_choice
+                    case "${key_action_choice:-0}" in
+                        1)
+                            upload_ssh_key_via_sftp "$menu_ssh_key" || true
+                            ;;
+                        2)
+                            generate_backup_ssh_key "$menu_ssh_key"
+                            ;;
+                    esac
                 else
                     generate_backup_ssh_key "$menu_ssh_key"
                 fi

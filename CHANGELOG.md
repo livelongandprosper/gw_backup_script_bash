@@ -35,6 +35,8 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
   - Setup-Assistent schlägt für neue Projekte standardmäßig `staffel` mit empfohlenen Werten vor.
 - **Testsuite:**
   - Synthetische Testsuite `test_retention_suite.sh` mit 8 Testfällen (400-Tage-Staffelung, Mindestbestand, unvollständige Sätze, Dateischutz, Abwärtskompatibilität, Konvertierung, Sicherheitsbarriere, SFTP-Fehlertoleranz).
+- **Entwicklungsstandards (`AGENTS.md`):**
+  - Verbindliche Projektstandards zu Sprache, Changelog-/Doku-Pflicht, Multi-Projekt-Architektur, Bash-/Portabilitätsregeln, Sicherheits- & Ampel-Konventionen sowie Testanforderungen in `AGENTS.md` festgehalten.
 
 ### Entfernt
 - **Veraltetes Hilfsskript `backup_sync_proxy_[projectname].sh`:**

@@ -41,6 +41,10 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
   - `RSYNC_PORT` (Standard `22`, z. B. `23` für Hetzner Storage Box) in `.env.<projekt>`, `.env.example`, Setup-Assistent, WordPress-Auto-Import, `rsync`-Upload (`ssh -p`) und Remote-Retention (`apply_retention_remote()`) ergänzt.
   - Optionale Passwort-Authentifizierung (`SFTP_PASSWORD`, `RSYNC_PASSWORD`) über `SSHPASS` / `sshpass -e` (ohne Passwort in CLI-Argumenten) ergänzt, falls kein SSH-Key verwendet wird (inkl. Prüfung auf vorhandenes `sshpass`).
   - Setup- und Doku-Hinweise für Hetzner Storage Boxen ergänzt (Port `23` für `rsync`/SSH, relative Zielpfade ohne führendes `/`, OpenSSH-Key-Format).
+- **Integrierter SSH-Key-Assistent (`backup_full_db_files_zip.sh`):**
+  - Im Setup-Assistenten (`run_setup_assistant()`), im WordPress-Auto-Import (`scan_and_setup_wordpress_sites()`) sowie über Hauptmenüpunkt `10` (`SSH-Key generieren / Public Key anzeigen`) kann direkt ein passwortloser OpenSSH-Key (`ed25519`, Fallback `rsa-4096`) im geschützten Unterordner `.ssh/id_ed25519_backup` des Backup-Skript-Verzeichnisses (`chmod 700`/`600` + `.htaccess`-Sperre) erzeugt werden.
+  - Nach der Erstellung (oder auf Wunsch bei vorhandenem Key) wird der öffentliche Schlüssel (`.pub`) samt Hinterlegungshinweis und optionalem `ssh-copy-id`-Befehl direkt im Terminal angezeigt.
+  - `.htaccess`-Schutzregel im Skript-Wurzelverzeichnis um `*.key`, `*.pub` und `id_*` erweitert.
 
 ### Entfernt
 - **Veraltetes Hilfsskript `backup_sync_proxy_[projectname].sh`:**

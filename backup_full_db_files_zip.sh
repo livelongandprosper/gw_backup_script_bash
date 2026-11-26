@@ -1035,7 +1035,7 @@ function ensure_webroot_protection() {
         if [ "$mode" == "sensitive_only" ]; then
             cat > "$htaccess_path" <<'EOF'
 # Schutz sensibler Dateien vor direktem Web-Aufruf (Apache 2.4 & 2.2)
-<FilesMatch "^(\.env.*|\.update.*|\.gotenberg.*|\.git.*|.*\.log|.*\.sh|.*\.json|.*\.lock)$">
+<FilesMatch "^(\.env.*|\.update.*|\.gotenberg.*|\.git.*|.*\.log|.*\.sh|.*\.json|.*\.lock|.*\.key|.*\.pub|id_.*)$">
     <IfModule mod_authz_core.c>
         Require all denied
     </IfModule>
@@ -1058,6 +1058,163 @@ EOF
 EOF
         fi
         chmod 644 "$htaccess_path" 2>/dev/null || true
+    fi
+}
+
+# Zeigt den öffentlichen SSH-Key (.pub) samt Hinterlegungshinweis für Zielprovider an
+function show_ssh_public_key() {
+    local key_path="$1"
+    local remote_host="${2:-}"
+    local remote_port="${3:-22}"
+    local remote_user="${4:-}"
+    local pub_path="${key_path}.pub"
+
+    if [ ! -f "$pub_path" ]; then
+        echo "Hinweis: Öffentlicher Key '$pub_path' wurde nicht gefunden." >&2
+        return 1
+    fi
+
+    echo
+    echo "=================================================="
+    echo "Öffentlicher SSH-Key (Public Key) für Zielprovider"
+    echo "=================================================="
+    cat "$pub_path"
+    echo "=================================================="
+    echo "Privater Key: $key_path"
+    echo "Öffentl. Key: $pub_path"
+    echo
+    echo "Hinweis: Diesen öffentlichen Schlüssel beim Zielprovider hinterlegen"
+    echo "(z. B. Hetzner Storage Box -> SSH-Keys bzw. .ssh/authorized_keys)."
+    if [ -n "$remote_host" ] && [ -n "$remote_user" ]; then
+        echo "Alternativ per ssh-copy-id übertragen:"
+        echo "  ssh-copy-id -p ${remote_port:-22} -i \"$pub_path\" \"$remote_user@$remote_host\""
+    fi
+    echo
+    return 0
+}
+
+# Erzeugt ein SSH-Key-Paar (ed25519, Fallback rsa-4096) ohne Passphrase und schützt das Verzeichnis
+function generate_backup_ssh_key() {
+    local target_key_path="$1"
+    local remote_host="${2:-}"
+    local remote_port="${3:-22}"
+    local remote_user="${4:-}"
+
+    if ! command -v ssh-keygen >/dev/null 2>&1; then
+        echo "FEHLER: 'ssh-keygen' ist auf diesem System nicht verfügbar." >&2
+        return 1
+    fi
+
+    local key_dir
+    key_dir="$(dirname "$target_key_path")"
+    if [[ "$key_dir" == "$basename" || "$key_dir" == "$basename/"* ]]; then
+        ensure_webroot_protection "$key_dir" "deny_all"
+    else
+        [ -d "$key_dir" ] || mkdir -p "$key_dir"
+        chmod 700 "$key_dir" 2>/dev/null || true
+    fi
+
+    if [ -f "$target_key_path" ]; then
+        read -rp "SSH-Key '$target_key_path' existiert bereits. Überschreiben? (j/N): " overwrite_key
+        if [[ ! "$overwrite_key" =~ ^[jJyY]$ ]]; then
+            echo "-> Vorhandener SSH-Key wird beibehalten."
+            show_ssh_public_key "$target_key_path" "$remote_host" "$remote_port" "$remote_user" || true
+            return 0
+        fi
+        rm -f "$target_key_path" "${target_key_path}.pub"
+    fi
+
+    local key_comment
+    key_comment="backup@$(hostname 2>/dev/null || echo 'server')"
+    if ! ssh-keygen -q -t ed25519 -N "" -f "$target_key_path" -C "$key_comment" 2>/dev/null; then
+        if ! ssh-keygen -q -t rsa -b 4096 -N "" -f "$target_key_path" -C "$key_comment"; then
+            echo "FEHLER: SSH-Key konnte nicht erzeugt werden." >&2
+            return 1
+        fi
+    fi
+
+    chmod 600 "$target_key_path" 2>/dev/null || true
+    [ -f "${target_key_path}.pub" ] && chmod 644 "${target_key_path}.pub" 2>/dev/null || true
+
+    echo "-> Neuer SSH-Key erfolgreich erstellt: $target_key_path"
+    show_ssh_public_key "$target_key_path" "$remote_host" "$remote_port" "$remote_user" || true
+    return 0
+}
+
+# Interaktive Auswahl oder Neuerstellung eines SSH-Keys bei der Einrichtung (setzt SELECTED_SSH_KEY_PATH)
+SELECTED_SSH_KEY_PATH=""
+function prompt_ssh_key_setup() {
+    local protocol_label="$1"
+    local suggested_key_path="$2"
+    local remote_host="${3:-}"
+    local remote_port="${4:-22}"
+    local remote_user="${5:-}"
+
+    local script_ssh_dir="$basename/.ssh"
+    local script_default_key="$script_ssh_dir/id_ed25519_backup"
+    local effective_key="${suggested_key_path:-$script_default_key}"
+
+    SELECTED_SSH_KEY_PATH=""
+    echo
+    echo "--- SSH-Key für $protocol_label ---"
+    if [ -f "$effective_key" ]; then
+        echo "  1) Vorhandenen SSH-Key verwenden ($effective_key) [Empfohlen]"
+        echo "  2) Neuen SSH-Key im Backup-Verzeichnis generieren ($script_default_key)"
+        echo "  3) Anderen SSH-Key-Pfad angeben"
+        echo "  4) Ohne SSH-Key (Passwort-Auth via sshpass)"
+        read -rp "Auswahl [1]: " key_menu_choice
+        case "${key_menu_choice:-1}" in
+            1)
+                SELECTED_SSH_KEY_PATH="$effective_key"
+                if [ -f "${effective_key}.pub" ]; then
+                    read -rp "Öffentlichen SSH-Key (.pub) zum Hinterlegen anzeigen? (j/N): " show_pub_choice
+                    if [[ "$show_pub_choice" =~ ^[jJyY]$ ]]; then
+                        show_ssh_public_key "$effective_key" "$remote_host" "$remote_port" "$remote_user" || true
+                    fi
+                fi
+                ;;
+            2)
+                if generate_backup_ssh_key "$script_default_key" "$remote_host" "$remote_port" "$remote_user"; then
+                    SELECTED_SSH_KEY_PATH="$script_default_key"
+                fi
+                ;;
+            3)
+                read -rp "Pfad zum privaten SSH-Key [$effective_key]: " custom_key_path
+                SELECTED_SSH_KEY_PATH="${custom_key_path:-$effective_key}"
+                [ "$SELECTED_SSH_KEY_PATH" = "-" ] && SELECTED_SSH_KEY_PATH=""
+                ;;
+            4)
+                SELECTED_SSH_KEY_PATH=""
+                ;;
+            *)
+                SELECTED_SSH_KEY_PATH="$effective_key"
+                ;;
+        esac
+    else
+        echo "  1) Neuen SSH-Key im Backup-Verzeichnis generieren ($script_default_key) [Empfohlen]"
+        echo "  2) Vorhandenen SSH-Key-Pfad angeben"
+        echo "  3) Ohne SSH-Key (Passwort-Auth via sshpass)"
+        read -rp "Auswahl [1]: " key_menu_choice
+        case "${key_menu_choice:-1}" in
+            1)
+                if generate_backup_ssh_key "$script_default_key" "$remote_host" "$remote_port" "$remote_user"; then
+                    SELECTED_SSH_KEY_PATH="$script_default_key"
+                fi
+                ;;
+            2)
+                read -rp "Pfad zum privaten SSH-Key [$script_default_key]: " custom_key_path
+                SELECTED_SSH_KEY_PATH="${custom_key_path:-$script_default_key}"
+                [ "$SELECTED_SSH_KEY_PATH" = "-" ] && SELECTED_SSH_KEY_PATH=""
+                ;;
+            3)
+                SELECTED_SSH_KEY_PATH=""
+                ;;
+            *)
+                if generate_backup_ssh_key "$script_default_key" "$remote_host" "$remote_port" "$remote_user"; then
+                    SELECTED_SSH_KEY_PATH="$script_default_key"
+                fi
+                ;;
+        esac
     fi
 }
 
@@ -1666,7 +1823,7 @@ function scan_and_setup_wordpress_sites() {
     local prev_sftp_host=""
     local prev_sftp_port="22"
     local prev_sftp_user=""
-    local prev_sftp_key="$HOME/.ssh/id_rsa_backup"
+    local prev_sftp_key="$basename/.ssh/id_ed25519_backup"
     local prev_sftp_password=""
     local prev_sftp_directory=""
     local prev_sftp_ssh_bin="/usr/bin/ssh"
@@ -1674,7 +1831,7 @@ function scan_and_setup_wordpress_sites() {
     local prev_rsync_port="22"
     local prev_rsync_user=""
     local prev_rsync_directory=""
-    local prev_rsync_key="$HOME/.ssh/id_rsa_backup"
+    local prev_rsync_key="$basename/.ssh/id_ed25519_backup"
     local prev_rsync_password=""
     local prev_delete_if_transmitted="false"
 
@@ -1789,9 +1946,8 @@ function scan_and_setup_wordpress_sites() {
                 else
                     read -rp "sftp User: " sftp_user
                 fi
-                read -rp "Pfad zum privaten SSH-Key ('-' = ohne Key / Passwort-Auth) [${prev_sftp_key:-$HOME/.ssh/id_rsa_backup}]: " input_sftp_key
-                sftp_key="${input_sftp_key:-${prev_sftp_key:-$HOME/.ssh/id_rsa_backup}}"
-                [ "$sftp_key" = "-" ] && sftp_key=""
+                prompt_ssh_key_setup "sftp" "$prev_sftp_key" "$sftp_host" "$sftp_port" "$sftp_user"
+                sftp_key="$SELECTED_SSH_KEY_PATH"
                 if [ -z "$sftp_key" ]; then
                     if [ -n "$prev_sftp_password" ]; then
                         read -rsp "sftp Passwort (erfordert 'sshpass', Enter = übernehmen, '-' = leer): " input_sftp_pass
@@ -1842,9 +1998,9 @@ function scan_and_setup_wordpress_sites() {
                 else
                     read -rp "rsync Zielverzeichnis (relativ zum Homeverzeichnis, z.B. 'backups/projekt'): " rsync_directory
                 fi
-                read -rp "Pfad zum privaten SSH-Key ('-' = ohne Key / Passwort-Auth) [${prev_rsync_key:-$HOME/.ssh/id_rsa_backup}]: " input_rsync_key
-                rsync_key="${input_rsync_key:-${prev_rsync_key:-$HOME/.ssh/id_rsa_backup}}"
-                [ "$rsync_key" = "-" ] && rsync_key=""
+                local suggested_rsync_key="${sftp_key:-$prev_rsync_key}"
+                prompt_ssh_key_setup "rsync" "$suggested_rsync_key" "$rsync_host" "$rsync_port" "$rsync_user"
+                rsync_key="$SELECTED_SSH_KEY_PATH"
                 if [ -z "$rsync_key" ]; then
                     if [ -n "$prev_rsync_password" ]; then
                         read -rsp "rsync Passwort (erfordert 'sshpass', Enter = übernehmen, '-' = leer): " input_rsync_pass
@@ -2108,9 +2264,8 @@ function run_setup_assistant() {
         read -rp "sftp Port (z.B. 22 oder 23 für Hetzner Storage Box) [22]: " sftp_port
         sftp_port=${sftp_port:-22}
         read -rp "sftp User: " sftp_user
-        read -rp "Pfad zum privaten SSH-Key ('-' = ohne Key / Passwort-Auth) [$HOME/.ssh/id_rsa_backup]: " sftp_key
-        sftp_key=${sftp_key:-$HOME/.ssh/id_rsa_backup}
-        [ "$sftp_key" = "-" ] && sftp_key=""
+        prompt_ssh_key_setup "sftp" "$basename/.ssh/id_ed25519_backup" "$sftp_host" "$sftp_port" "$sftp_user"
+        sftp_key="$SELECTED_SSH_KEY_PATH"
         if [ -z "$sftp_key" ]; then
             read -rsp "sftp Passwort (optional, erfordert 'sshpass', Eingabe unsichtbar): " sftp_password
             echo
@@ -2133,9 +2288,9 @@ function run_setup_assistant() {
         rsync_port=${rsync_port:-22}
         read -rp "rsync User: " rsync_user
         read -rp "rsync Zielverzeichnis (relativ zum Homeverzeichnis, z.B. 'backups/projekt'): " rsync_directory
-        read -rp "Pfad zum privaten SSH-Key ('-' = ohne Key / Passwort-Auth) [$HOME/.ssh/id_rsa_backup]: " rsync_key
-        rsync_key=${rsync_key:-$HOME/.ssh/id_rsa_backup}
-        [ "$rsync_key" = "-" ] && rsync_key=""
+        local suggested_rsync_key="${sftp_key:-$basename/.ssh/id_ed25519_backup}"
+        prompt_ssh_key_setup "rsync" "$suggested_rsync_key" "$rsync_host" "$rsync_port" "$rsync_user"
+        rsync_key="$SELECTED_SSH_KEY_PATH"
         if [ -z "$rsync_key" ]; then
             read -rsp "rsync Passwort (optional, erfordert 'sshpass', Eingabe unsichtbar): " rsync_password
             echo
@@ -3117,6 +3272,7 @@ function run_main_menu() {
         echo "  7) Projekt-Datengröße anzeigen"
         echo "  8) Projektübersicht anzeigen"
         echo "  9) Aufbewahrung prüfen / einstellen (Staffel/GVS)"
+        echo " 10) SSH-Key generieren / Public Key anzeigen"
         echo "  0) Beenden"
         echo "======================================"
         read -rp "Auswahl: " menu_choice
@@ -3183,6 +3339,18 @@ function run_main_menu() {
                 ;;
             9)
                 manage_project_retention
+                ;;
+            10)
+                local menu_ssh_key="$basename/.ssh/id_ed25519_backup"
+                if [ -f "$menu_ssh_key" ]; then
+                    show_ssh_public_key "$menu_ssh_key" || true
+                    read -rp "Neuen SSH-Key generieren (überschreibt vorhandenen)? (j/N): " regen_choice
+                    if [[ "$regen_choice" =~ ^[jJyY]$ ]]; then
+                        generate_backup_ssh_key "$menu_ssh_key"
+                    fi
+                else
+                    generate_backup_ssh_key "$menu_ssh_key"
+                fi
                 ;;
             0)
                 echo "Beendet."

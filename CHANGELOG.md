@@ -62,6 +62,8 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
   - Neue Etappe 3b ergänzt: Ablösung des selbst gehosteten Gotenberg-9-Screenshot-Dienstes durch die Cloud-API [ApiFlash](https://apiflash.com/) (`https://api.apiflash.com/v1/urltoimage`) inkl. zentraler `.apiflash`-Konfiguration, sicherer `curl -K -`-Übergabe, `fresh=true`, `no_cookie_banners=true`, Quota-Auswertung und Abnahmekriterien.
 
 ### Entfernt
+- **`.junie`-Verzeichnis aus dem Repository entfernt (`.gitignore`):**
+  - Alle getrackten `.junie/plans/*`-Dateien per `git rm` aus dem Repository entfernt und `/.junie/` in `.gitignore` aufgenommen.
 - **`sshpass`-Abhängigkeit entfernt (`backup_full_db_files_zip.sh`, `README.md`):**
   - Sämtliche `sshpass`-Abhängigkeiten und -Aufrufe aus Skript und Dokumentation entfernt; Passwort-Authentifizierung nutzt stattdessen natives OpenSSH `SSH_ASKPASS`.
 - **Hetzner-spezifische Sonderbehandlung entfernt (`backup_full_db_files_zip.sh`, `.env.example`, `README.md`):**

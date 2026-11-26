@@ -1,4 +1,5 @@
 /.idea
+/.junie/
 .env
 .env.*
 !.env.example

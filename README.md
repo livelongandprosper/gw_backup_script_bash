@@ -171,6 +171,9 @@ BackupScript - Hauptmenü
   6) Datenbank wiederherstellen
   7) Projekt-Datengröße anzeigen
   8) Projektübersicht anzeigen
+  9) Aufbewahrung prüfen / einstellen (Staffel/GVS)
+ 10) SSH-Key generieren / anzeigen / per SFTP hinterlegen
+ 11) SFTP- & rsync-Verbindung testen
   0) Beenden
 ======================================
 ```
@@ -190,6 +193,9 @@ BackupScript - Hauptmenü
   bisherigen Backups eines Projekts an (`du -sh`).
 - **Projektübersicht anzeigen**: listet alle konfigurierten Projekte mit Anzahl der
   Datenbanken, Website-Ordner, Standard-Umfang und dem letzten Backup auf.
+- **Aufbewahrung prüfen / einstellen (Staffel/GVS)**: zeigt die geplante Aufbewahrungsstaffel und erlaubt das Umstellen bestehender Projekte auf `staffel`.
+- **SSH-Key generieren / anzeigen / per SFTP hinterlegen**: erzeugt einen passwortlosen OpenSSH-Key unter `.ssh/`, zeigt Copy-Paste-Befehle an und kann ihn per SFTP auf dem Zielserver hinterlegen.
+- **SFTP- & rsync-Verbindung testen**: prüft konfigurierte SFTP- und rsync-Zugangsdaten (inkl. Port, Key/Passwort und Zielverzeichnis) nicht-destruktiv für ein oder alle Projekte (entspricht `--test-remote`).
 
 Das Menü wird nur angezeigt, wenn das Skript interaktiv (in einem Terminal) und
 komplett ohne Parameter aufgerufen wird. Sobald ein Parameter übergeben wird
@@ -209,7 +215,7 @@ Das Skript kann selbstständig WordPress-Installationen suchen und vollständig 
 - **Automatisches Auslesen:** `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST` und Tabellen-Präfixe werden direkt und sicher aus `wp-config.php` ausgelesen.
 - **Intelligente Vorschläge:** Aus `WP_HOME`, `WP_SITEURL` oder dem Ordnernamen wird automatisch ein passender Projektname vorgeschlagen.
 - **Ausschlussmuster:** Typische WordPress-Cache- und Backup-Verzeichnisse (`*/wp-content/cache/*`, `*/wp-content/uploads/cache/*`, `*/wp-content/updraft/*`, etc.) werden auf Wunsch direkt als Ausschluss hinterlegt.
-- **Externe Übertragung (SFTP/rsync) & SSH-Key-Assistent:** Auf Wunsch können pro Installation direkt SFTP- und/oder rsync-Zugangsdaten (inkl. abweichender Ports über `SFTP_PORT`/`RSYNC_PORT`, SSH-Key oder Passwort-Authentifizierung via `SFTP_PASSWORD`/`RSYNC_PASSWORD` ohne `sshpass`) sowie `DELETE_IF_TRANSMITTED` konfiguriert werden; bei mehreren Installationen werden die zuletzt eingegebenen Werte als Standardvorschlag übernommen.
+- **Externe Übertragung (SFTP/rsync) & SSH-Key-Assistent:** Auf Wunsch können pro Installation direkt SFTP- und/oder rsync-Zugangsdaten (inkl. abweichender Ports über `SFTP_PORT`/`RSYNC_PORT`, SSH-Key oder Passwort-Authentifizierung via `SFTP_PASSWORD`/`RSYNC_PASSWORD` ohne `sshpass`) sowie `DELETE_IF_TRANSMITTED` konfiguriert und direkt im Anschluss getestet werden; bei mehreren Installationen werden die zuletzt eingegebenen Werte als Standardvorschlag übernommen.
   - *SSH-Key direkt bei der Einrichtung generieren & per SFTP hinterlegen:* Im Setup-Assistenten, im WordPress-Auto-Import sowie über Hauptmenüpunkt `10` kann direkt ein passwortloser OpenSSH-Key (`ed25519`, Fallback `rsa-4096`) im geschützten Unterordner `.ssh/id_ed25519_backup` des Backup-Skript-Verzeichnisses (`chmod 700`/`600` + `.htaccess`-Sperre) erzeugt werden. Der öffentliche Schlüssel (`.pub`) wird anschließend direkt samt fertigen Copy-Paste-Befehlen (für `~/.ssh/authorized_keys` auf dem Zielserver und `ssh-copy-id`) angezeigt und kann auf Wunsch **direkt per SFTP mit Passwortabfrage** auf den Zielserver hochgeladen werden (trägt den OpenSSH-Key in `.ssh/authorized_keys` ein, ohne bestehende Keys zu überschreiben, und verifiziert anschließend den passwortlosen Login).
   - *Passwort-Authentifizierung ohne `sshpass`:* Alternativ zum SSH-Key können `SFTP_PASSWORD` bzw. `RSYNC_PASSWORD` hinterlegt werden (über OpenSSH `SSH_ASKPASS` ohne Drittanbieter-Tool `sshpass` und ohne sichtbare Passwörter in der Prozessliste).
 - **Manuelle Ergänzung:** Sollten Zugangsdaten fehlen oder abweichen, können alle Werte während des Assistenten bestätigt, angepasst oder manuell eingegeben werden.
@@ -263,6 +269,7 @@ Vor Backups (besonders vor CMS-/Plugin-Updates) führt das Skript automatische P
 ```
 ./backup_full_db_files_zip.sh --check                  # Pre-Check für alle bzw. ausgewählte Projekte
 ./backup_full_db_files_zip.sh --check --project=kundeA  # Pre-Check gezielt für "kundeA"
+./backup_full_db_files_zip.sh --test-remote --project=kundeA  # SFTP-/rsync-Verbindung testen
 ```
 
 **Was wird geprüft? (mit übersichtlicher Farbcodierung `[✓ OK]`, `[⚠ WARNUNG]`, `[✖ ACHTUNG]`):**

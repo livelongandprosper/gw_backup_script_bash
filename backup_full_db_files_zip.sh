@@ -89,6 +89,7 @@ cli_project=''
 cli_scope=''
 restore_mode='false'
 check_mode='false'
+test_remote_mode='false'
 cli_scan_wp='false'
 cli_scan_wp_path=''
 cli_json='false'
@@ -112,6 +113,9 @@ for cli_arg in "$@"; do
             ;;
         --check|--pre-check)
             check_mode='true'
+            ;;
+        --test-remote)
+            test_remote_mode='true'
             ;;
         --scan-wp)
             cli_scan_wp='true'
@@ -148,6 +152,7 @@ for cli_arg in "$@"; do
             echo "  --retention-dry-run     Prüft Aufbewahrungsregeln (Staffel/GVS) und zeigt Tabellenvorschau."
             echo "  --restore               Datenbank aus vorhandenem Backup wiederherstellen (interaktiv)."
             echo "  --check|--pre-check     Pre-Backup & Sicherheitsprüfungen für das Projekt durchführen."
+            echo "  --test-remote           Testet konfigurierte SFTP- und rsync-Verbindungen für das Projekt."
             echo "  --scan-wp[=<ordner>]    Sucht nach WordPress-Installationen (Standard: ..) und richtet .env ein."
             echo "  --json                  Gibt am Ende den Laufstatus als JSON auf stdout aus."
             echo "                          Fortschritts- und Logausgaben werden nach stderr umgeleitet."
@@ -910,9 +915,13 @@ function apply_retention_remote() {
     local ssh_opts=(-o "Port=$r_port" -o "ConnectTimeout=15" -o "StrictHostKeyChecking=accept-new")
     if [ -n "$r_key" ]; then
         ssh_opts+=(-o "PubkeyAuthentication=yes" -o "IdentityFile=$r_key")
-        [ -z "$r_pass" ] && ssh_opts+=(-o "BatchMode=yes")
+        if [ -n "$r_pass" ]; then
+            ssh_opts+=(-o "BatchMode=no")
+        else
+            ssh_opts+=(-o "BatchMode=yes")
+        fi
     elif [ -n "$r_pass" ]; then
-        ssh_opts+=(-o "PubkeyAuthentication=no" -o "NumberOfPasswordPrompts=1")
+        ssh_opts+=(-o "BatchMode=no" -o "PubkeyAuthentication=no" -o "NumberOfPasswordPrompts=1")
     else
         ssh_opts+=(-o "BatchMode=yes")
     fi
@@ -1122,6 +1131,209 @@ EOF
 
     rm -f "$askpass_script"
     return "$rc"
+}
+
+# Testet eine SFTP-Verbindung nicht-destruktiv (Login + optionaler Wechsel ins Zielverzeichnis)
+function test_sftp_connection() {
+    local host="$1"
+    local port="${2:-22}"
+    local user="$3"
+    local key="${4:-}"
+    local password="${5:-}"
+    local directory="${6:-}"
+    local ssh_bin="${7:-}"
+
+    if [ -z "$host" ] || [ -z "$user" ]; then
+        echo "  [FEHLER] SFTP-Test nicht möglich: Host oder Benutzername fehlt." >&2
+        return 1
+    fi
+    if ! command -v sftp >/dev/null 2>&1; then
+        echo "  [FEHLER] 'sftp' ist auf diesem System nicht verfügbar." >&2
+        return 1
+    fi
+
+    local auth_info="Passwort/Standard-SSH"
+    if [ -n "$key" ] && [ -n "$password" ]; then
+        auth_info="SSH-Key ($key) + Passwort-Fallback"
+    elif [ -n "$key" ]; then
+        auth_info="SSH-Key ($key)"
+        if [ ! -f "$key" ]; then
+            echo "  [FEHLER] SFTP SSH-Key '$key' wurde nicht gefunden." >&2
+            return 1
+        fi
+    elif [ -n "$password" ]; then
+        auth_info="Passwort (SSH_ASKPASS)"
+    fi
+
+    echo
+    echo "======================================"
+    echo "SFTP-Verbindungstest"
+    echo "======================================"
+    echo "Endpunkt:        $user@$host:$port"
+    echo "Authentifizierung: $auth_info"
+    echo "Zielverzeichnis: ${directory:-<Homeverzeichnis>}"
+
+    local sftp_test_batch
+    sftp_test_batch="$(mktemp 2>/dev/null || mktemp -t 'sftptest')" || return 1
+    chmod 600 "$sftp_test_batch" 2>/dev/null || true
+    if [ -n "$directory" ]; then
+        printf 'pwd\ncd "%s"\nls\nexit\n' "$directory" > "$sftp_test_batch"
+    else
+        printf 'pwd\nls\nexit\n' > "$sftp_test_batch"
+    fi
+
+    local ssh_opts=(-o "Port=$port" -o "ConnectTimeout=15" -o "StrictHostKeyChecking=accept-new")
+    if [ -n "$key" ]; then
+        ssh_opts+=(-o "PubkeyAuthentication=yes" -o "IdentityFile=$key")
+        if [ -n "$password" ]; then
+            ssh_opts+=(-o "BatchMode=no")
+        else
+            ssh_opts+=(-o "BatchMode=yes")
+        fi
+    elif [ -n "$password" ]; then
+        ssh_opts+=(-o "BatchMode=no" -o "PubkeyAuthentication=no" -o "NumberOfPasswordPrompts=1")
+    else
+        ssh_opts+=(-o "BatchMode=yes")
+    fi
+
+    local sftp_out=""
+    local sftp_rc=0
+    if [ -n "$password" ]; then
+        sftp_out=$(run_with_ssh_password "$password" sftp ${ssh_bin:+-S "$ssh_bin"} "${ssh_opts[@]}" -b "$sftp_test_batch" "$user@$host" 2>&1) || sftp_rc=$?
+    else
+        sftp_out=$(sftp ${ssh_bin:+-S "$ssh_bin"} "${ssh_opts[@]}" -b "$sftp_test_batch" "$user@$host" 2>&1) || sftp_rc=$?
+    fi
+    rm -f "$sftp_test_batch"
+
+    if [ "$sftp_rc" -eq 0 ]; then
+        if [ -n "$directory" ]; then
+            echo "  [  OK  ] SFTP-Verbindung zu '$user@$host:$port' erfolgreich und Zielverzeichnis '$directory' erreichbar!"
+        else
+            echo "  [  OK  ] SFTP-Verbindung zu '$user@$host:$port' erfolgreich!"
+        fi
+        return 0
+    else
+        echo "  [FEHLER] SFTP-Verbindung zu '$user@$host:$port' fehlgeschlagen (Status: $sftp_rc)." >&2
+        if [ -n "$sftp_out" ]; then
+            echo "  Details: $(printf '%s\n' "$sftp_out" | tail -n 5 | tr '\n' ' ')" >&2
+        fi
+        if [ -n "$directory" ] && [[ "$sftp_out" == *"No such file"* || "$sftp_out" == *"Couldn't canonicalize"* ]]; then
+            echo "  Hinweis: Das Zielverzeichnis '$directory' existiert auf dem Zielserver möglicherweise noch nicht." >&2
+        fi
+        return 1
+    fi
+}
+
+# Testet eine rsync-Verbindung über SSH nicht-destruktiv (--list-only)
+function test_rsync_connection() {
+    local host="$1"
+    local port="${2:-22}"
+    local user="$3"
+    local key="${4:-}"
+    local password="${5:-}"
+    local directory="${6:-}"
+
+    if [ -z "$host" ] || [ -z "$user" ]; then
+        echo "  [FEHLER] rsync-Test nicht möglich: Host oder Benutzername fehlt." >&2
+        return 1
+    fi
+    if ! command -v rsync >/dev/null 2>&1; then
+        echo "  [FEHLER] 'rsync' ist auf diesem System nicht verfügbar." >&2
+        return 1
+    fi
+
+    local auth_info="Passwort/Standard-SSH"
+    if [ -n "$key" ] && [ -n "$password" ]; then
+        auth_info="SSH-Key ($key) + Passwort-Fallback"
+    elif [ -n "$key" ]; then
+        auth_info="SSH-Key ($key)"
+        if [ ! -f "$key" ]; then
+            echo "  [FEHLER] rsync SSH-Key '$key' wurde nicht gefunden." >&2
+            return 1
+        fi
+    elif [ -n "$password" ]; then
+        auth_info="Passwort (SSH_ASKPASS)"
+    fi
+
+    echo
+    echo "======================================"
+    echo "rsync-Verbindungstest"
+    echo "======================================"
+    echo "Endpunkt:        $user@$host:$port"
+    echo "Authentifizierung: $auth_info"
+    echo "Zielverzeichnis: ${directory:-<Homeverzeichnis>}"
+
+    local rsync_ssh_cmd="ssh -p $port -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new"
+    if [ -n "$key" ]; then
+        rsync_ssh_cmd="$rsync_ssh_cmd -i '$key' -o PubkeyAuthentication=yes"
+        [ -z "$password" ] && rsync_ssh_cmd="$rsync_ssh_cmd -o BatchMode=yes"
+    elif [ -n "$password" ]; then
+        rsync_ssh_cmd="$rsync_ssh_cmd -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1"
+    else
+        rsync_ssh_cmd="$rsync_ssh_cmd -o BatchMode=yes"
+    fi
+
+    local remote_target="$user@$host:${directory:+$directory/}"
+    local rsync_out=""
+    local rsync_rc=0
+    if [ -n "$password" ]; then
+        rsync_out=$(run_with_ssh_password "$password" rsync --list-only -e "$rsync_ssh_cmd" "$remote_target" 2>&1) || rsync_rc=$?
+    else
+        rsync_out=$(rsync --list-only -e "$rsync_ssh_cmd" "$remote_target" 2>&1) || rsync_rc=$?
+    fi
+
+    if [ "$rsync_rc" -eq 0 ]; then
+        if [ -n "$directory" ]; then
+            echo "  [  OK  ] rsync-Verbindung zu '$user@$host:$port' erfolgreich und Zielverzeichnis '$directory' erreichbar!"
+        else
+            echo "  [  OK  ] rsync-Verbindung zu '$user@$host:$port' erfolgreich!"
+        fi
+        return 0
+    else
+        echo "  [FEHLER] rsync-Verbindung zu '$user@$host:$port' fehlgeschlagen (Status: $rsync_rc)." >&2
+        if [ -n "$rsync_out" ]; then
+            echo "  Details: $(printf '%s\n' "$rsync_out" | tail -n 5 | tr '\n' ' ')" >&2
+        fi
+        if [ -n "$directory" ] && [[ "$rsync_out" == *"No such file"* || "$rsync_out" == *"link_stat"* ]]; then
+            echo "  Hinweis: Das Zielverzeichnis '$directory' existiert auf dem Zielserver möglicherweise noch nicht." >&2
+        fi
+        return 1
+    fi
+}
+
+# Testet alle konfigurierten Remote-Verbindungen (SFTP/rsync) für eine .env.<projekt>-Datei
+function test_remote_connections_for_env() {
+    local project_env_file="$1"
+    local p_name
+    p_name="$(project_name_from_env_file "$project_env_file")"
+
+    reset_project_config_variables
+    source "$project_env_file"
+
+    echo
+    echo "--------------------------------------------------"
+    echo "Remote-Verbindungstest für Projekt '$p_name'"
+    echo "--------------------------------------------------"
+
+    if [ -z "${SFTP_HOST:-}" ] && [ -z "${RSYNC_HOST:-}" ]; then
+        echo "  [INFO ] Für Projekt '$p_name' ist weder SFTP noch rsync konfiguriert."
+        return 0
+    fi
+
+    local overall_rc=0
+    if [ -n "${SFTP_HOST:-}" ]; then
+        if ! test_sftp_connection "$SFTP_HOST" "${SFTP_PORT:-22}" "$SFTP_USER" "${SFTP_KEY:-}" "${SFTP_PASSWORD:-}" "${SFTP_DIRECTORY:-}" "${SFTP_PATH_TO_SSH_BINARY:-}"; then
+            overall_rc=1
+        fi
+    fi
+
+    if [ -n "${RSYNC_HOST:-}" ]; then
+        if ! test_rsync_connection "$RSYNC_HOST" "${RSYNC_PORT:-22}" "$RSYNC_USER" "${RSYNC_KEY:-}" "${RSYNC_PASSWORD:-}" "${RSYNC_DIRECTORY:-}"; then
+            overall_rc=1
+        fi
+    fi
+
+    return "$overall_rc"
 }
 
 # Lädt den öffentlichen SSH-Key per SFTP (mit Passwortabfrage) nach .ssh/authorized_keys hoch,
@@ -2116,6 +2328,10 @@ function scan_and_setup_wordpress_sites() {
                 fi
                 read -rp "Pfad zum lokalen ssh-Binary [${prev_sftp_ssh_bin:-/usr/bin/ssh}]: " input_sftp_ssh_bin
                 sftp_path_to_ssh_binary="${input_sftp_ssh_bin:-${prev_sftp_ssh_bin:-/usr/bin/ssh}}"
+                read -rp "SFTP-Verbindung jetzt testen? (J/n) [J]: " test_sftp_now
+                if [[ "${test_sftp_now:-J}" =~ ^[jJyY]$ ]]; then
+                    test_sftp_connection "$sftp_host" "${sftp_port:-22}" "$sftp_user" "$sftp_key" "$sftp_password" "$sftp_directory" "$sftp_path_to_ssh_binary" || true
+                fi
             fi
 
             echo
@@ -2159,6 +2375,10 @@ function scan_and_setup_wordpress_sites() {
                         read -rsp "rsync Passwort (optional, Eingabe unsichtbar): " rsync_password
                         echo
                     fi
+                fi
+                read -rp "rsync-Verbindung jetzt testen? (J/n) [J]: " test_rsync_now
+                if [[ "${test_rsync_now:-J}" =~ ^[jJyY]$ ]]; then
+                    test_rsync_connection "$rsync_host" "${rsync_port:-22}" "$rsync_user" "$rsync_key" "$rsync_password" "$rsync_directory" || true
                 fi
             fi
 
@@ -2418,6 +2638,10 @@ function run_setup_assistant() {
         read -rp "sftp Zielverzeichnis (optional, z.B. 'backups/projekt'): " sftp_directory
         read -rp "Pfad zum lokalen ssh-Binary [/usr/bin/ssh]: " input_sftp_ssh_bin
         sftp_path_to_ssh_binary=${input_sftp_ssh_bin:-/usr/bin/ssh}
+        read -rp "SFTP-Verbindung jetzt testen? (J/n) [J]: " test_sftp_now
+        if [[ "${test_sftp_now:-J}" =~ ^[jJyY]$ ]]; then
+            test_sftp_connection "$sftp_host" "${sftp_port:-22}" "$sftp_user" "$sftp_key" "$sftp_password" "$sftp_directory" "$sftp_path_to_ssh_binary" || true
+        fi
     fi
 
     echo
@@ -2439,6 +2663,10 @@ function run_setup_assistant() {
         if [ -z "$rsync_key" ]; then
             read -rsp "rsync Passwort (optional, Eingabe unsichtbar): " rsync_password
             echo
+        fi
+        read -rp "rsync-Verbindung jetzt testen? (J/n) [J]: " test_rsync_now
+        if [[ "${test_rsync_now:-J}" =~ ^[jJyY]$ ]]; then
+            test_rsync_connection "$rsync_host" "${rsync_port:-22}" "$rsync_user" "$rsync_key" "$rsync_password" "$rsync_directory" || true
         fi
     fi
 
@@ -3418,6 +3646,7 @@ function run_main_menu() {
         echo "  8) Projektübersicht anzeigen"
         echo "  9) Aufbewahrung prüfen / einstellen (Staffel/GVS)"
         echo " 10) SSH-Key generieren / anzeigen / per SFTP hinterlegen"
+        echo " 11) SFTP- & rsync-Verbindung testen"
         echo "  0) Beenden"
         echo "======================================"
         read -rp "Auswahl: " menu_choice
@@ -3504,6 +3733,35 @@ function run_main_menu() {
                     esac
                 else
                     generate_backup_ssh_key "$menu_ssh_key"
+                fi
+                ;;
+            11)
+                refresh_env_files
+                if [ "${#env_files[@]}" -eq 0 ]; then
+                    echo "Keine Projekt-Konfiguration (.env.<projekt>) vorhanden. Bitte zuerst ein Projekt einrichten."
+                elif [ "${#env_files[@]}" -eq 1 ]; then
+                    test_remote_connections_for_env "${env_files[0]}" || true
+                else
+                    echo "======================================"
+                    echo "Für welches Projekt sollen SFTP-/rsync-Verbindungen getestet werden?"
+                    local rem_idx=1
+                    local existing_env_file
+                    for existing_env_file in "${env_files[@]}"; do
+                        echo "  $rem_idx) $(project_name_from_env_file "$existing_env_file")"
+                        rem_idx=$((rem_idx + 1))
+                    done
+                    echo "  a) alle Projekte"
+                    echo "======================================"
+                    read -rp "Projekt auswählen (Nummer oder 'a'): " rem_choice
+                    if [ "$rem_choice" == "a" ]; then
+                        for existing_env_file in "${env_files[@]}"; do
+                            test_remote_connections_for_env "$existing_env_file" || true
+                        done
+                    elif [ -n "$rem_choice" ] && [ "$rem_choice" -ge 1 ] 2>/dev/null && [ "$rem_choice" -le "${#env_files[@]}" ] 2>/dev/null; then
+                        test_remote_connections_for_env "${env_files[$((rem_choice - 1))]}" || true
+                    else
+                        echo "Ungültige Auswahl." >&2
+                    fi
                 fi
                 ;;
             0)
@@ -4100,9 +4358,13 @@ function run_backup_for_project() {
         local sftp_upload_opts=(-o "Port=$sftp_port" -o "ConnectTimeout=15" -o "StrictHostKeyChecking=accept-new")
         if [ -n "$sftp_key" ]; then
             sftp_upload_opts+=(-o "PubkeyAuthentication=yes" -o "IdentityFile=$sftp_key")
-            [ -z "$sftp_password" ] && sftp_upload_opts+=(-o "BatchMode=yes")
+            if [ -n "$sftp_password" ]; then
+                sftp_upload_opts+=(-o "BatchMode=no")
+            else
+                sftp_upload_opts+=(-o "BatchMode=yes")
+            fi
         elif [ -n "$sftp_password" ]; then
-            sftp_upload_opts+=(-o "PubkeyAuthentication=no" -o "NumberOfPasswordPrompts=1")
+            sftp_upload_opts+=(-o "BatchMode=no" -o "PubkeyAuthentication=no" -o "NumberOfPasswordPrompts=1")
         else
             sftp_upload_opts+=(-o "BatchMode=yes")
         fi
@@ -4480,6 +4742,64 @@ if [ "$check_mode" == "true" ]; then
         [ -n "$chk_target_env" ] && run_pre_backup_checks "$chk_target_env"
     fi
     exit 0
+fi
+
+# Remote-Verbindungstest (--test-remote): SFTP und rsync für Projekt(e) testen
+if [ "$test_remote_mode" == "true" ]; then
+    test_remote_exit=0
+    if [ "$cli_project" == "alle" ]; then
+        for rem_env in "${env_files[@]}"; do
+            if ! test_remote_connections_for_env "$rem_env"; then
+                test_remote_exit=1
+            fi
+        done
+    else
+        rem_target_env=''
+        if [ -n "$cli_project" ]; then
+            match_env_file="$basename/.env.$cli_project"
+            if [ -f "$match_env_file" ]; then
+                rem_target_env="$match_env_file"
+            else
+                echo "Kein Projekt '$cli_project' gefunden." >&2
+                exit 1
+            fi
+        elif [ "${#env_files[@]}" -eq 1 ]; then
+            rem_target_env="${env_files[0]}"
+        else
+            echo "======================================"
+            echo "Für welches Projekt sollen SFTP-/rsync-Verbindungen getestet werden?"
+            project_index=1
+            for existing_env_file in "${env_files[@]}"; do
+                echo "  $project_index) $(project_name_from_env_file "$existing_env_file")"
+                project_index=$((project_index + 1))
+            done
+            echo "  a) alle Projekte"
+            echo "======================================"
+            read -rp "Projekt auswählen (Nummer oder 'a' für alle): " rem_choice
+            if [ "$rem_choice" == "a" ]; then
+                for existing_env_file in "${env_files[@]}"; do
+                    if ! test_remote_connections_for_env "$existing_env_file"; then
+                        test_remote_exit=1
+                    fi
+                done
+                exit "$test_remote_exit"
+            else
+                if ! is_valid_project_selection "$rem_choice" "${#env_files[@]}"; then
+                    echo "Ungültige Auswahl." >&2
+                    exit 1
+                fi
+                selected_index=$((10#$rem_choice - 1))
+                rem_target_env="${env_files[$selected_index]}"
+            fi
+        fi
+
+        if [ -n "$rem_target_env" ]; then
+            if ! test_remote_connections_for_env "$rem_target_env"; then
+                test_remote_exit=1
+            fi
+        fi
+    fi
+    exit "$test_remote_exit"
 fi
 
 # Projekt(e) auswählen, die in diesem Lauf verarbeitet werden sollen

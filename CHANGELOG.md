@@ -45,6 +45,9 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
   - Nach der Erstellung (oder auf Wunsch bei vorhandenem Key) wird der öffentliche Schlüssel (`.pub`) direkt im Terminal samt fertigen Copy-Paste-Befehlen (Eintrag in `~/.ssh/authorized_keys` mit eingebettetem Public Key sowie `ssh-copy-id`) angezeigt.
   - Über die neue Funktion `upload_ssh_key_via_sftp()` kann der öffentliche Schlüssel direkt aus dem Setup oder Hauptmenüpunkt `10` per SFTP (mit interaktiver Passwortabfrage, ohne `sshpass`) als OpenSSH-Key in `.ssh/authorized_keys` hinterlegt werden – inklusive Duplikatsprüfung ohne Überschreiben bestehender Keys sowie anschließendem Login-Test.
   - `.htaccess`-Schutzregel im Skript-Wurzelverzeichnis um `*.key`, `*.pub` und `id_*` erweitert.
+- **SFTP- & rsync-Verbindungstest (`backup_full_db_files_zip.sh`):**
+  - Neue Testfunktionen `test_sftp_connection()`, `test_rsync_connection()` (`rsync --list-only`) und `test_remote_connections_for_env()` prüfen Login, SSH-Key/Passwort (`SSH_ASKPASS`), Port und Erreichbarkeit des konfigurierten Zielverzeichnisses nicht-destruktiv.
+  - Direkt nach der Einrichtung von SFTP bzw. rsync in beiden Assistenten (`run_setup_assistant()`, `scan_and_setup_wordpress_sites()`) auf Wunsch ausführbar sowie über Hauptmenüpunkt `11) SFTP- & rsync-Verbindung testen` und `--test-remote [--project=<name>|alle]` jederzeit aufrufbar.
 
 ### Entfernt
 - **`sshpass`-Abhängigkeit entfernt (`backup_full_db_files_zip.sh`, `README.md`):**
@@ -78,6 +81,8 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
   - Der Setup-Assistent in `backup_full_db_files_zip.sh` nutzt dafür nun ebenfalls `find_wp_config_in_path()`; in `update_wp.sh` durchsucht `run_setup_wizard()` bei fehlenden `.env.<projekt>`-Dateien optional ganze Verzeichnisbäume (`-maxdepth 4`) und löst verschachtelte `WP_PATH`-Angaben automatisch auf.
 - **Externe Übertragung im WordPress-Auto-Import (`backup_full_db_files_zip.sh`):**
   - `scan_and_setup_wordpress_sites()` (`--scan-wp` / automatische Ersteinrichtung) fragt nun pro Installation optional ab, ob Backups extern per SFTP und/oder rsync übertragen und nach erfolgreicher Übertragung lokal gelöscht werden sollen (`DELETE_IF_TRANSMITTED`). Bei mehreren Installationen werden eingegebene Remote-Daten automatisch als Standardvorschlag für nachfolgende Projekte übernommen.
+- **SFTP-Passwort-Authentifizierung im Batch-Modus (`backup_full_db_files_zip.sh`):**
+  - Bei allen SFTP-Batch-Aufrufen (`-b`) mit `SFTP_PASSWORD` (Upload, Verbindungstest und Remote-Retention) wird nun explizit `-o BatchMode=no` übergeben, da `sftp -b` intern `-obatchmode yes` setzt und OpenSSH `8.4+` sonst `SSH_ASKPASS` blockiert (`Permission denied (publickey,password)`).
 
 ---
 

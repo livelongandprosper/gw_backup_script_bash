@@ -97,8 +97,9 @@ graph LR
     E1[Etappe 1: Ehrliche Backup-Rückmeldung] --> E2[Etappe 2: Hetzner Storage Box]
     E2 --> E2b[Etappe 2b: Wiederherstellung üben]
     E1 --> E3[Etappe 3: update_wp.sh & Gotenberg 9]
+    E3 --> E3b[Etappe 3b: ApiFlash statt Gotenberg]
     E2b --> E4[Etappe 4: Mac-Wrapper - optional]
-    E3 --> E4
+    E3b --> E4
     E4 --> E5[Etappe 5: Wartungsberichte & Dashboard]
 ```
 
@@ -345,7 +346,60 @@ Risikolose, automatisierte WordPress-Aktualisierungen mit vorgeschaltetem Backup
 - *Test 5 (Verbindungstest via CLI):* `./update_wp.sh --test-screenshot` prüft Gotenberg-Endpunkt und meldet Status im Terminal.
 
 #### Aufwandsschätzung
-**L** (Umgesetzt, bereit zur Endabnahme).
+**L** (Umgesetzt, bereit zur Endabnahme; Ablösung des Screenshot-Backends durch ApiFlash siehe Etappe 3b).
+
+---
+
+### Etappe 3b: Screenshot-Backend von Gotenberg 9 auf ApiFlash (`apiflash.com`) umstellen
+*Status: geplant (offen)*  
+*Direkt nach Etappe 3 anzusiedeln*
+
+#### Ziel & Nutzen
+Ablösung des selbst gehosteten Gotenberg-9-Dienstes durch die verwaltete Cloud-Screenshot-API **ApiFlash** (`https://apiflash.com/`). Dadurch entfällt der Wartungs- und Serveraufwand für einen eigenen Docker-/Chromium-Container, während gleichzeitig integrierte Funktionen wie automatisches Ausblenden von Cookie-Bannern (`no_cookie_banners=true`), Ad-Blocking (`no_ads=true`) und gezieltes Warten auf DOM-Elemente (`wait_for`) genutzt werden können.
+
+#### ApiFlash Spezifikation & API-Details
+- **Dienst:** `https://api.apiflash.com/v1/urltoimage` (Chrome auf AWS Lambda, HTTPS GET-Request).
+- **Wichtige API-Parameter:**
+  - `access_key`: API-Schlüssel aus zentraler Konfiguration (`.apiflash`, `chmod 600`, Webroot-Schutz via `.htaccess`).
+  - `url`: URL-kodierte Ziel-URL (z. B. `https://example.com/`).
+  - `format=png`: Bildformat `png` für verlustfreien Pixel-Vergleich.
+  - `width`: Viewport-Breite in Pixeln (Desktop: `1440`, Mobile: `390`).
+  - `full_page=true`: Ganzseiten-Screenshot (bzw. konfigurierbar).
+  - `delay`: Zusätzliche Wartezeit in Sekunden nach Network-Idle (Standardwert z. B. `5`, abgeleitet aus `SCREENSHOT_WAIT`).
+  - `fresh=true`: Erzwingt bei jedem Vorher-/Nachher-Lauf einen frischen Screenshot ohne API-Caching.
+  - `no_cookie_banners=true` / `no_ads=true`: Optionale automatische Bereinigung störender Overlays.
+  - `cookies` / `wait_for`: Optionale Übergabe von Cookies oder CSS-Selektoren.
+- **Sicherheit & Fehlerbehandlung:**
+  - Übergabe des `access_key` bzw. der Anfrage-URL nicht als sichtbares CLI-Argument in `ps`, sondern über `curl -K -` via `stdin`.
+  - Auswertung von HTTP `200` + PNG-Magic-Bytes sowie Quota-Headern (`X-Quota-Limit`, `X-Quota-Remaining`, `X-Quota-Reset`) bzw. HTTP `429` (Rate-/Quota-Limit).
+  - Beibehaltung der Ampel-Fehlertoleranz: Ist ApiFlash nicht erreichbar oder das Kontingent erschöpft, bricht das Update **nicht** ab, sondern die Optik-Prüfung geht kontrolliert auf **GELB**.
+
+#### Aufgaben-Checkliste
+- [ ] **Zentrale ApiFlash-Konfiguration einführen (`.apiflash`):**
+  - Ersetzen von `.gotenberg` (`GOTENBERG_URL`, `GOTENBERG_USER`, `GOTENBERG_PASS`, `GOTENBERG_TIMEOUT`) durch `.apiflash` (`APIFLASH_ACCESS_KEY`, `APIFLASH_TIMEOUT`, optionale Defaults wie `APIFLASH_NO_COOKIE_BANNERS='true'`, `APIFLASH_FULL_PAGE='true'`).
+  - Webroot-Schutz in `ensure_webroot_protection()` (`.htaccess`) in beiden Skripten auf `.apiflash*` erweitern bzw. `.gotenberg*` sauber ablösen.
+- [ ] **Screenshot-Client in `update_wp.sh` umstellen:**
+  - `load_gotenberg_config()`, `test_gotenberg_connection()` und `capture_screenshot()` auf ApiFlash (`https://api.apiflash.com/v1/urltoimage`) umstellen.
+  - Sichere Parameter-Übergabe per `curl -K -` (kein `access_key` in der Prozessliste), URL-Encoding der Ziel-URL sowie Umrechnung von `SCREENSHOT_WAIT` (z. B. `5s` → `delay=5`).
+  - `fresh=true` für alle Vorher-/Nachher-Vergleiche erzwingen.
+- [ ] **Setup-Assistent, CLI & JSON-Ausgabe anpassen:**
+  - `run_setup_wizard()` und Hauptmenüpunkt `5` in `update_wp.sh` auf ApiFlash-Einrichtung und -Verbindungstest (`--test-screenshot`) umstellen.
+  - Ausgabe von verbleibendem ApiFlash-Kontingent (`X-Quota-Remaining` / `X-Quota-Limit`) beim Verbindungstest.
+  - Gotenberg-Referenzen aus `update_wp.sh`, `README.md`, `AGENTS.md` und `CHANGELOG.md` bereinigen.
+
+#### Betroffene Dateien & Funktionen
+- `update_wp.sh`: Konfigurationslader, `capture_screenshot`, Verbindungstest, `run_setup_wizard`, Hauptmenü, `ensure_webroot_protection`.
+- `backup_full_db_files_zip.sh`: `ensure_webroot_protection` (`.htaccess`-Regel für `.apiflash*`).
+- `README.md`, `CHANGELOG.md`, `AGENTS.md`.
+
+#### Abnahmekriterien
+1. `update_wp.sh --setup` richtet `.apiflash` (`chmod 600`, `.htaccess`-geschützt) ohne Gotenberg-Abfragen ein.
+2. `update_wp.sh --test-screenshot` lädt ein valides PNG über `https://api.apiflash.com/v1/urltoimage` und zeigt das verbleibende Quota an.
+3. Vorher-/Nachher-Screenshots werden mit `fresh=true` erzeugt und funktionieren nahtlos mit dem bestehenden ImageMagick-/PHP-GD-Vergleich.
+4. Bei fehlendem Key, HTTP `429` oder Netzwerkfehler bricht kein Update ab (Optik-Prüfung = GELB).
+
+#### Aufwandsschätzung
+**S** (Austausch der Screenshot-API-Anbindung und Setup-Konfiguration).
 
 ---
 
@@ -455,7 +509,8 @@ Automatisierte Erstellung transparenter Monatsberichte für Kunden sowie eine ü
 | :--- | :--- | :--- | :--- |
 | **Storage Box Provisionierung (Etappe 2)** | Wie werden Unterkonten bei Hetzner angelegt? | A: Manuell im Hetzner Robot / Cloud Console.<br>B: Automatisiert über Hetzner Robot WebService API. | **Option A** für Start (einfach, keine API-Token auf dem Webserver nötig). Optional später CLI-Helper für den Mac. |
 | **SSH-Port & Hostkeys (Etappe 2)** | Wie wird der SSH-Hostkey der Storage Box verifiziert? | A: Interaktive Bestätigung beim Setup (`ssh -p 23`).<br>B: Vorkonfigurierte `known_hosts`-Einträge für Hetzner Storage Boxen. | **Option A** mit Speicherung in projekteigenem `known_hosts`-File. |
-| **Gotenberg-Zugangsdaten (Etappe 3)** | Sollen Gotenberg-Zugangsdaten pro Kunde getrennt oder zentral gemeinsam genutzt werden? | A: Zentraler gemeinsamer Zugang für alle Kunden in `.gotenberg`.<br>B: Eigener API-Benutzer pro Kunde. | **Tendenz: Gemeinsamer Zugang (Option A)**, da Gotenberg als zustandsloser Renderer ausschließlich öffentlich erreichbare URLs verarbeitet. Ein Rate-Limit wird am Dienst selbst konfiguriert. |
+| **Gotenberg-Zugangsdaten (Etappe 3)** | Sollen Gotenberg-Zugangsdaten pro Kunde getrennt oder zentral gemeinsam genutzt werden? | A: Zentraler gemeinsamer Zugang für alle Kunden in `.gotenberg`.<br>B: Eigener API-Benutzer pro Kunde. | **Entschieden für Etappe 3b:** Ablösung von Gotenberg durch ApiFlash (`https://apiflash.com/`) mit zentralem `APIFLASH_ACCESS_KEY` in `.apiflash`. |
+| **ApiFlash-Optionen (Etappe 3b)** | Welche ApiFlash-Parameter sollen standardmäßig aktiv sein? | A: `fresh=true`, `full_page=true`, `no_cookie_banners=true`, `delay=5`.<br>B: Minimaler Aufruf ohne `no_cookie_banners`. | **Option A**, um gecachte Altbilder und Cookie-Banner-Abweichungen im Vorher-/Nachher-Diff zu vermeiden. |
 | **Mac-Tooling (Etappe 4)** | Welcher Tech-Stack für das Mac-Wrapper-Skript? | A: Reines Bash-Skript mit `curl` und `ssh`.<br>B: Node.js / TypeScript CLI mit Playwright-Integration. | **Option A** als Kern (läuft out-of-the-box auf jedem Mac ohne Node-Abhängigkeiten). |
 | **Berichts-Ausgabe (Etappe 5)** | Welches Zielformat für monatliche Kundenberichte? | A: Markdown für formatierte E-Mails.<br>B: Statisches responsive HTML. | **Option A & B** kombinieren (HTML-Dashboard für Web, Markdown für direkten Mailversand). |
 

@@ -98,7 +98,7 @@ Skript zur sicheren Durchführung von WordPress Core-, Plugin-, Theme- und Sprac
 - **Setup-Assistent (`--setup`)**:
   - Ermittelt `SITE_URL` automatisch per WP-CLI (`wp option get siteurl`)
   - Ermittelt `MUST_CONTAIN` direkt aus dem ausgelieferten Startseiten-HTML (bevorzugt `blogname` falls exakt im Quelltext vorhanden, sonst `<h1>`, `<title>`-Segment, `og:site_name` oder sichtbaren Body-Text), damit die `grep -F`-Prüfung zuverlässig greift
-  - Liest `CHECK_PATHS` und `SCREENSHOT_PATHS` automatisch aus der Website-Sitemap (`robots.txt`, `/wp-sitemap.xml`, `/sitemap_index.xml`, `/sitemap.xml` inkl. Sitemap-Index mit Bevorzugung von `page`-Sitemaps; Fallback: `/ /kontakt/ /impressum/`)
+  - Liest `CHECK_PATHS` und `SCREENSHOT_PATHS` automatisch aus der Website-Sitemap (`robots.txt`, `/wp-sitemap.xml`, `/sitemap_index.xml`, `/sitemap.xml` inkl. Sitemap-Index mit Bevorzugung von `page`-Sitemaps; Fallback: `/`)
   - Lässt `SKIP_PLUGINS` standardmäßig leer (`keine`), damit keine regulären Plugins versehentlich von Sicherheitsupdates ausgeschlossen werden (`SKIP_PLUGINS` ist nur für bewusste manuelle Ausnahmen gedacht)
 - **Sicherer Ablauf pro Projekt (`--project=<name>|alle`)**:
   1. Lock-Datei pro Projekt verhindert parallele Ausführung

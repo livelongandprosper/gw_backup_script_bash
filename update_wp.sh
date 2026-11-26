@@ -909,6 +909,7 @@ function run_setup_wizard() {
     for proj in "${available_projects[@]}"; do
         local update_cfg="$basename/.update.$proj"
         local env_cfg="$basename/.env.$proj"
+        echo
         echo "--------------------------------------------------"
         echo "Konfiguration für Projekt: '$proj'"
         echo "--------------------------------------------------"
@@ -974,27 +975,27 @@ function run_setup_wizard() {
         [ -z "$first_configured_url" ] && first_configured_url="$current_site_url"
 
         if [ -z "$current_must_contain" ]; then
-            echo "Ermittle Textvorschlag (MUST_CONTAIN) von '$current_site_url' ..."
+            echo "  Ermittle Textvorschlag (MUST_CONTAIN) von '$current_site_url' ..."
             local detected_must_contain
             detected_must_contain=$(detect_must_contain_from_url "$current_site_url" "$detected_blogname")
             if [ -n "$detected_must_contain" ]; then
                 current_must_contain="$detected_must_contain"
-                echo "-> Ermittelter Text: $current_must_contain"
+                echo "  -> Ermittelter Text: $current_must_contain"
             elif [ -n "$detected_blogname" ]; then
                 current_must_contain="$detected_blogname"
             fi
         fi
 
         if [ -z "$current_check_paths" ]; then
-            echo "Suche Prüfseiten in der Sitemap von '$current_site_url' ..."
+            echo "  Suche Prüfseiten in der Sitemap von '$current_site_url' ..."
             local detected_sitemap_paths
             detected_sitemap_paths=$(detect_check_paths_from_sitemap "$current_site_url")
             if [ -n "$detected_sitemap_paths" ]; then
                 current_check_paths="$detected_sitemap_paths"
-                echo "-> Aus Sitemap ermittelt: $current_check_paths"
+                echo "  -> Aus Sitemap ermittelt: $current_check_paths"
             else
-                current_check_paths="/ /kontakt/ /impressum/"
-                echo "-> Keine Sitemap gefunden, nutze Standardpfade: $current_check_paths"
+                current_check_paths="/"
+                echo "  -> Keine Sitemap gefunden, nutze Standardpfad: $current_check_paths"
             fi
         fi
 
@@ -1283,7 +1284,7 @@ function detect_check_paths_from_sitemap() {
         while IFS= read -r sm_url; do
             sm_url=$(echo "$sm_url" | tr -d '\r' | xargs 2>/dev/null || true)
             [ -n "$sm_url" ] && candidate_sitemaps+=("$sm_url")
-        done < <(echo "$robots_body" | sed -nE 's/^[Ss][Ii][Tt][Ee][Mm][Aa][Pp]:[[:space:]]*([^[:space:]]+).*/\1/p')
+        done < <(echo "$robots_body" | sed -n 's/^[Ss][Ii][Tt][Ee][Mm][Aa][Pp]:[[:space:]]*\([^[:space:]]*\).*/\1/p' 2>/dev/null)
     fi
 
     # 2. Typische WordPress- und SEO-Sitemap-Pfade ergänzen
@@ -1782,6 +1783,7 @@ function run_update_for_project() {
     local backup_dateien_json="[]"
     local backup_uebertragen_json="null"
 
+    echo
     echo "==================================================" | tee -a "$run_log"
     echo "update_wp.sh Lauf für Projekt '$project_name'" | tee -a "$run_log"
     echo "Startzeit: $(date +"%Y-%m-%d %H:%M:%S") | Run-Dir: $run_dir" | tee -a "$run_log"
@@ -1853,7 +1855,7 @@ function run_update_for_project() {
 
         # Startseite auf MUST_CONTAIN prüfen
         if [ "$p" == "/" ] || [ "$p" == "" ]; then
-            if [ -n "$MUST_CONTAIN" ] && ! echo "$HTTP_CHECK_BODY" | grep -F -q "$MUST_CONTAIN"; then
+            if [ -n "$MUST_CONTAIN" ] && [[ "$HTTP_CHECK_BODY" != *"$MUST_CONTAIN"* ]]; then
                 log_check_item "ROT" "Vorprüfung Startseite enthält erforderlichen Text '$MUST_CONTAIN' nicht!" "$run_log"
                 pre_http_failed="true"
                 status_reasons+=("Schon vorher defekt: Startseite enthält MUST_CONTAIN ('$MUST_CONTAIN') nicht")
@@ -1863,6 +1865,7 @@ function run_update_for_project() {
 
     if [ "$pre_http_failed" == "true" ]; then
         log_check_item "ROT" "ABBRUCH: Website war schon vor dem Update defekt! Keine Updates durchgeführt." "$run_log"
+        echo
         final_status="rot"
         final_exitcode=2
         write_and_output_result
@@ -2310,7 +2313,7 @@ function run_update_for_project() {
         fi
 
         # HTML auf Fatal Errors prüfen
-        if echo "$HTTP_CHECK_BODY" | grep -qiE '(Fatal error|kritischer Fehler|critical error)'; then
+        if grep -qiE -q '(Fatal error|kritischer Fehler|critical error)' <<< "$HTTP_CHECK_BODY"; then
             log_check_item "ROT" "Post-Check HTTP-Seite '$p' enthält Fehlermeldung ('Fatal error' / 'kritischer Fehler')!" "$run_log"
             status_reasons+=("Fehlermeldung im HTML-Quelltext von '$p'")
             final_status="rot"
@@ -2319,7 +2322,7 @@ function run_update_for_project() {
 
         # Startseite auf MUST_CONTAIN prüfen
         if [ "$p" == "/" ] || [ "$p" == "" ]; then
-            if [ -n "$MUST_CONTAIN" ] && ! echo "$HTTP_CHECK_BODY" | grep -F -q "$MUST_CONTAIN"; then
+            if [ -n "$MUST_CONTAIN" ] && [[ "$HTTP_CHECK_BODY" != *"$MUST_CONTAIN"* ]]; then
                 log_check_item "ROT" "Post-Check Startseite enthält erforderlichen Text '$MUST_CONTAIN' nicht mehr!" "$run_log"
                 status_reasons+=("MUST_CONTAIN ('$MUST_CONTAIN') fehlt auf Startseite nach Update")
                 final_status="rot"

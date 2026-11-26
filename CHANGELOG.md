@@ -47,7 +47,8 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
 - **Setup-Assistent in `update_wp.sh` korrigiert & erweitert:**
   - Automatischen Vorschlag für `SKIP_PLUGINS` entfernt (`--skip-plugins` + `grep -E '(none|custom|disabled)'` schlug fälschlich alle aktuellen WordPress.org-Plugins zum Ausschluss vor); `SKIP_PLUGINS` bleibt bei der Einrichtung nun standardmäßig leer.
   - Automatische Ermittlung von `MUST_CONTAIN` aus dem tatsächlichen HTML der Startseite (`detect_must_contain_from_url()` / `detect_must_contain_from_html()`), sodass nur real im Quelltext enthaltene Texte vorgeschlagen werden.
-  - Automatische Ermittlung von `CHECK_PATHS` und `SCREENSHOT_PATHS` aus der Sitemap (`detect_check_paths_from_sitemap()` über `robots.txt`, `/wp-sitemap.xml`, `/sitemap_index.xml`, `/sitemap.xml` inkl. Sitemap-Index), mit Fallback auf `/ /kontakt/ /impressum/`.
+  - Automatische Ermittlung von `CHECK_PATHS` und `SCREENSHOT_PATHS` aus der Sitemap (`detect_check_paths_from_sitemap()` über `robots.txt`, `/wp-sitemap.xml`, `/sitemap_index.xml`, `/sitemap.xml` inkl. Sitemap-Index, POSIX-kompatibles `sed` ohne `-E`), mit Fallback auf `/` (nur Startseite).
+  - `MUST_CONTAIN`- und Fatal-Error-Prüfung im HTML-Body (`update_wp.sh`) von Pipes auf Bash-Substring-Vergleich bzw. Here-String umgestellt, damit `set -o pipefail` bei großen HTML-Seiten keinen SIGPIPE-Fehlalarm (`MUST_CONTAIN` nicht gefunden) auslöst; zudem Ausgabeabstände zwischen Projekten im Setup und Update-Lauf geglättet.
 
 ---
 

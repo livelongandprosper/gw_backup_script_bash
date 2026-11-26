@@ -37,17 +37,20 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
   - Synthetische Testsuite `test_retention_suite.sh` mit 8 Testfällen (400-Tage-Staffelung, Mindestbestand, unvollständige Sätze, Dateischutz, Abwärtskompatibilität, Konvertierung, Sicherheitsbarriere, SFTP-Fehlertoleranz).
 - **Entwicklungsstandards (`AGENTS.md`):**
   - Verbindliche Projektstandards zu Sprache, Changelog-/Doku-Pflicht, Multi-Projekt-Architektur, Bash-/Portabilitätsregeln, Sicherheits- & Ampel-Konventionen sowie Testanforderungen in `AGENTS.md` festgehalten.
-- **Abweichende Ports, Hetzner Storage Box & optionale Passwort-Auth (`backup_full_db_files_zip.sh`):**
-  - `RSYNC_PORT` (Standard `22`, z. B. `23` für Hetzner Storage Box) in `.env.<projekt>`, `.env.example`, Setup-Assistent, WordPress-Auto-Import, `rsync`-Upload (`ssh -p`) und Remote-Retention (`apply_retention_remote()`) ergänzt.
-  - Optionale Passwort-Authentifizierung (`SFTP_PASSWORD`, `RSYNC_PASSWORD`) über `SSHPASS` / `sshpass -e` (ohne Passwort in CLI-Argumenten) ergänzt, falls kein SSH-Key verwendet wird (inkl. Prüfung auf vorhandenes `sshpass`).
-  - Setup- und Doku-Hinweise für Hetzner Storage Boxen ergänzt (Port `23` für `rsync`/SSH, relative Zielpfade ohne führendes `/`, OpenSSH-Key-Format).
+- **Abweichende Ports & Passwort-Authentifizierung ohne `sshpass` (`backup_full_db_files_zip.sh`):**
+  - `RSYNC_PORT` (Standard `22`, z. B. auch `23`) in `.env.<projekt>`, `.env.example`, Setup-Assistent, WordPress-Auto-Import, `rsync`-Upload (`ssh -p`) und Remote-Retention (`apply_retention_remote()`) ergänzt.
+  - Passwort-Authentifizierung für SFTP (`SFTP_PASSWORD`) und `rsync` (`RSYNC_PASSWORD`) nativ über OpenSSH `SSH_ASKPASS` (`run_with_ssh_password()`, ohne `sshpass` und ohne Passwörter in CLI-Argumenten) für Upload, Remote-Retention sowie beide Setup-Assistenten umgesetzt.
 - **Integrierter SSH-Key-Assistent (`backup_full_db_files_zip.sh`):**
   - Im Setup-Assistenten (`run_setup_assistant()`), im WordPress-Auto-Import (`scan_and_setup_wordpress_sites()`) sowie über Hauptmenüpunkt `10` (`SSH-Key generieren / anzeigen / per SFTP hinterlegen`) kann direkt ein passwortloser OpenSSH-Key (`ed25519`, Fallback `rsa-4096`) im geschützten Unterordner `.ssh/id_ed25519_backup` des Backup-Skript-Verzeichnisses (`chmod 700`/`600` + `.htaccess`-Sperre) erzeugt werden.
-  - Nach der Erstellung (oder auf Wunsch bei vorhandenem Key) wird der öffentliche Schlüssel (`.pub`) direkt im Terminal samt fertigen Copy-Paste-Befehlen (Eintrag in `~/.ssh/authorized_keys` mit eingebettetem Public Key, Hetzner Storage Box `install-ssh-key` über Port `23` sowie `ssh-copy-id`) angezeigt.
-  - Über die neue Funktion `upload_ssh_key_via_sftp()` kann der öffentliche Schlüssel direkt aus dem Setup oder Hauptmenüpunkt `10` per SFTP (mit interaktiver Passwortabfrage, ohne `sshpass`) in `.ssh/authorized_keys` hinterlegt werden – inklusive RFC4716- und OpenSSH-Format (kompatibel mit Hetzner Storage Box Port `22` & `23`), Duplikatsprüfung ohne Überschreiben bestehender Keys sowie anschließendem Login-Test.
+  - Nach der Erstellung (oder auf Wunsch bei vorhandenem Key) wird der öffentliche Schlüssel (`.pub`) direkt im Terminal samt fertigen Copy-Paste-Befehlen (Eintrag in `~/.ssh/authorized_keys` mit eingebettetem Public Key sowie `ssh-copy-id`) angezeigt.
+  - Über die neue Funktion `upload_ssh_key_via_sftp()` kann der öffentliche Schlüssel direkt aus dem Setup oder Hauptmenüpunkt `10` per SFTP (mit interaktiver Passwortabfrage, ohne `sshpass`) als OpenSSH-Key in `.ssh/authorized_keys` hinterlegt werden – inklusive Duplikatsprüfung ohne Überschreiben bestehender Keys sowie anschließendem Login-Test.
   - `.htaccess`-Schutzregel im Skript-Wurzelverzeichnis um `*.key`, `*.pub` und `id_*` erweitert.
 
 ### Entfernt
+- **`sshpass`-Abhängigkeit entfernt (`backup_full_db_files_zip.sh`, `README.md`):**
+  - Sämtliche `sshpass`-Abhängigkeiten und -Aufrufe aus Skript und Dokumentation entfernt; Passwort-Authentifizierung nutzt stattdessen natives OpenSSH `SSH_ASKPASS`.
+- **Hetzner-spezifische Sonderbehandlung entfernt (`backup_full_db_files_zip.sh`, `.env.example`, `README.md`):**
+  - RFC4716-Key-Export (`ssh-keygen -e -f`), den speziellen `install-ssh-key`-Copy-Paste-Befehl sowie Hetzner-/Storage-Box-spezifische Setup- und Doku-Hinweise entfernt, da Standard-OpenSSH-Keys (z. B. über Port `23`) direkt funktionieren.
 - **Veraltetes Hilfsskript `backup_sync_proxy_[projectname].sh`:**
   - Entfernung des nicht mehr benötigten Proxy-Sync-Skripts, da Remote-Übertragung und Bereinigung direkt und nativ über SFTP/Rsync im Hauptskript abgebildet werden.
 - **Abwärtskompatibilitäten restlos entfernt (`backup_full_db_files_zip.sh`, `update_wp.sh`, `.env.example`, `test_retention_suite.sh`, `README.md`):**

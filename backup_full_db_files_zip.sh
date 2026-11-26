@@ -907,25 +907,19 @@ function apply_retention_remote() {
     echo "ls -l" >> "$sftp_ls_batch"
     echo "exit" >> "$sftp_ls_batch"
 
-    local use_sshpass="false"
     local ssh_opts=(-o "Port=$r_port" -o "ConnectTimeout=15" -o "StrictHostKeyChecking=accept-new")
     if [ -n "$r_key" ]; then
-        ssh_opts+=(-o "PubkeyAuthentication=yes" -o "IdentityFile=$r_key" -o "BatchMode=yes")
+        ssh_opts+=(-o "PubkeyAuthentication=yes" -o "IdentityFile=$r_key")
+        [ -z "$r_pass" ] && ssh_opts+=(-o "BatchMode=yes")
     elif [ -n "$r_pass" ]; then
-        if ! command -v sshpass >/dev/null 2>&1; then
-            rm -f "$sftp_ls_batch"
-            RETENTION_REMOTE_ERROR="sshpass nicht installiert (für Passwort-Auth erforderlich)"
-            echo "Warnung: Remote-Dateiliste für '$p_name' nicht abrufbar: 'sshpass' fehlt für Passwort-Auth." | tee -a "$log_target" >&2
-            return 1
-        fi
-        use_sshpass="true"
+        ssh_opts+=(-o "PubkeyAuthentication=no" -o "NumberOfPasswordPrompts=1")
     else
         ssh_opts+=(-o "BatchMode=yes")
     fi
 
     local sftp_out
-    if [ "$use_sshpass" = "true" ]; then
-        sftp_out=$(SSHPASS="$r_pass" sshpass -e sftp ${r_ssh:+-S "$r_ssh"} "${ssh_opts[@]}" -b "$sftp_ls_batch" "$r_user@$r_host" 2>&1)
+    if [ -n "$r_pass" ]; then
+        sftp_out=$(run_with_ssh_password "$r_pass" sftp ${r_ssh:+-S "$r_ssh"} "${ssh_opts[@]}" -b "$sftp_ls_batch" "$r_user@$r_host" 2>&1)
     else
         sftp_out=$(sftp ${r_ssh:+-S "$r_ssh"} "${ssh_opts[@]}" -b "$sftp_ls_batch" "$r_user@$r_host" 2>&1)
     fi
@@ -1001,8 +995,8 @@ function apply_retention_remote() {
         echo "exit" >> "$sftp_rm_batch"
 
         local rm_out
-        if [ "$use_sshpass" = "true" ]; then
-            rm_out=$(SSHPASS="$r_pass" sshpass -e sftp ${r_ssh:+-S "$r_ssh"} "${ssh_opts[@]}" -b "$sftp_rm_batch" "$r_user@$r_host" 2>&1)
+        if [ -n "$r_pass" ]; then
+            rm_out=$(run_with_ssh_password "$r_pass" sftp ${r_ssh:+-S "$r_ssh"} "${ssh_opts[@]}" -b "$sftp_rm_batch" "$r_user@$r_host" 2>&1)
         else
             rm_out=$(sftp ${r_ssh:+-S "$r_ssh"} "${ssh_opts[@]}" -b "$sftp_rm_batch" "$r_user@$r_host" 2>&1)
         fi
@@ -1078,17 +1072,15 @@ function show_ssh_public_key() {
     pub_key_content="$(tr -d '\r\n' < "$pub_path")"
     local escaped_pub_key="${pub_key_content//\'/\'\\\'\'}"
     local target_conn="<user>@<host>"
-    local hetzner_target="<user>@<user>.your-storagebox.de"
     local effective_port="${remote_port:-22}"
 
     if [ -n "$remote_host" ] && [ -n "$remote_user" ]; then
         target_conn="$remote_user@$remote_host"
-        hetzner_target="$remote_user@$remote_host"
     fi
 
     echo
     echo "=================================================="
-    echo "Öffentlicher SSH-Key (Public Key) für Zielprovider"
+    echo "Öffentlicher SSH-Key (Public Key) für Zielserver"
     echo "=================================================="
     echo "$pub_key_content"
     echo "=================================================="
@@ -1099,20 +1091,40 @@ function show_ssh_public_key() {
     echo "  1) Direkt auf dem Zielserver (in ~/.ssh/authorized_keys eintragen):"
     echo "     mkdir -p ~/.ssh && chmod 700 ~/.ssh && printf '%s\\n' '$escaped_pub_key' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
     echo
-    echo "  2) Hetzner Storage Box (von diesem Server aus über Port 23, OpenSSH + RFC4716):"
-    echo "     printf '%s\\n' '$escaped_pub_key' | ssh -p 23 \"$hetzner_target\" install-ssh-key"
-    echo
-    echo "  3) Standard-SSH-Server (von diesem Server aus per ssh-copy-id):"
+    echo "  2) Von diesem Server aus per ssh-copy-id:"
     echo "     ssh-copy-id -p $effective_port -i \"$pub_path\" \"$target_conn\""
     echo
-    echo "  4) Per SFTP mit Passwort (wenn kein direkter SSH-Login / Web-UI-Key-Feld möglich ist):"
-    echo "     Im Assistenten oder Hauptmenü Punkt 10 direkt auswählbar (lädt RFC4716 + OpenSSH nach .ssh/authorized_keys hoch)."
+    echo "  3) Per SFTP mit Passwort (wenn kein direkter SSH-Login / Web-UI-Key-Feld möglich ist):"
+    echo "     Im Assistenten oder Hauptmenü Punkt 10 direkt auswählbar (trägt den Key in .ssh/authorized_keys ein)."
     echo
     return 0
 }
 
-# Lädt den öffentlichen SSH-Key per SFTP (mit Passwortabfrage) nach .ssh/authorized_keys hoch.
-# Schreibt sowohl das RFC4716-Format (für Hetzner Port 22) als auch OpenSSH (für Port 23 / Standard-SSH),
+# Führt einen SSH-/SFTP-/rsync-Befehl mit Passwort über OpenSSH SSH_ASKPASS aus (ohne sshpass, ohne Passwort in CLI-Argumenten)
+function run_with_ssh_password() {
+    local password="$1"
+    shift
+
+    local askpass_script
+    askpass_script="$(mktemp 2>/dev/null || mktemp -t 'askpass')" || return 1
+    chmod 700 "$askpass_script" 2>/dev/null || true
+    cat > "$askpass_script" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$BACKUP_SSH_ASKPASS_SECRET"
+EOF
+
+    local rc=0
+    BACKUP_SSH_ASKPASS_SECRET="$password" \
+    SSH_ASKPASS="$askpass_script" \
+    SSH_ASKPASS_REQUIRE="force" \
+    DISPLAY="${DISPLAY:-none:0}" \
+    "$@" || rc=$?
+
+    rm -f "$askpass_script"
+    return "$rc"
+}
+
+# Lädt den öffentlichen SSH-Key per SFTP (mit Passwortabfrage) nach .ssh/authorized_keys hoch,
 # ohne bestehende Einträge in .ssh/authorized_keys zu überschreiben.
 function upload_ssh_key_via_sftp() {
     local key_path="$1"
@@ -1132,7 +1144,7 @@ function upload_ssh_key_via_sftp() {
     fi
 
     if [ -z "$remote_host" ]; then
-        read -rp "SFTP Ziel-Host (z. B. <user>.your-storagebox.de): " remote_host
+        read -rp "SFTP Ziel-Host (z. B. backup.example.com): " remote_host
     fi
     if [ -z "$remote_host" ]; then
         echo "Abbruch: Kein Ziel-Host angegeben." >&2
@@ -1158,16 +1170,11 @@ function upload_ssh_key_via_sftp() {
     local append_script="$tmp_sftp_dir/append_key.sh"
     local pub_key_b64
     pub_key_b64="$(awk '{print $2}' "$pub_path" | tr -d '\r\n')"
-    local rfc_file="$tmp_sftp_dir/key_rfc4716.pub"
-    if command -v ssh-keygen >/dev/null 2>&1; then
-        ssh-keygen -e -f "$pub_path" > "$rfc_file" 2>/dev/null || rm -f "$rfc_file"
-    fi
 
     cat > "$append_script" <<EOF
 #!/bin/bash
 AUTH_FILE="$local_auth_file"
 PUB_FILE="$pub_path"
-RFC_FILE="$rfc_file"
 KEY_B64="$pub_key_b64"
 touch "\$AUTH_FILE"
 chmod 600 "\$AUTH_FILE" 2>/dev/null || true
@@ -1177,9 +1184,6 @@ if [ -n "\$KEY_B64" ] && grep -F -q "\$KEY_B64" "\$AUTH_FILE" 2>/dev/null; then
 fi
 if [ -s "\$AUTH_FILE" ]; then
     tail -c 1 "\$AUTH_FILE" | read -r _ || printf '\\n' >> "\$AUTH_FILE"
-fi
-if [ -f "\$RFC_FILE" ] && [ -s "\$RFC_FILE" ]; then
-    cat "\$RFC_FILE" >> "\$AUTH_FILE"
 fi
 cat "\$PUB_FILE" >> "\$AUTH_FILE"
 EOF
@@ -1214,7 +1218,7 @@ EOF
         if sftp -P "$remote_port" ${ssh_bin:+-S "$ssh_bin"} -o "PubkeyAuthentication=yes" -o "IdentityFile=$key_path" -o "BatchMode=yes" -o "ConnectTimeout=15" -o "StrictHostKeyChecking=accept-new" "$remote_user@$remote_host" <<< "bye" >/dev/null 2>&1; then
             echo "  [✓ OK] Passwortloser SFTP-Login mit '$key_path' erfolgreich verifiziert!"
         else
-            echo "  [⚠ WARNUNG] Key wurde hochgeladen, aber der sofortige Key-Test auf Port $remote_port schlug fehl (bei Hetzner ggf. Port 22/23 oder 'Externe Erreichbarkeit' prüfen)." >&2
+            echo "  [⚠ WARNUNG] Key wurde hochgeladen, aber der sofortige Key-Test auf Port $remote_port schlug fehl (ggf. Port oder SSH-Zugriff beim Zielserver prüfen)." >&2
         fi
     fi
 
@@ -1293,7 +1297,7 @@ function prompt_ssh_key_setup() {
         echo "  1) Vorhandenen SSH-Key verwenden ($effective_key) [Empfohlen]"
         echo "  2) Neuen SSH-Key im Backup-Verzeichnis generieren ($script_default_key)"
         echo "  3) Anderen SSH-Key-Pfad angeben"
-        echo "  4) Ohne SSH-Key (Passwort-Auth via sshpass)"
+        echo "  4) Ohne SSH-Key (Passwort-Authentifizierung)"
         read -rp "Auswahl [1]: " key_menu_choice
         case "${key_menu_choice:-1}" in
             1)
@@ -1334,7 +1338,7 @@ function prompt_ssh_key_setup() {
     else
         echo "  1) Neuen SSH-Key im Backup-Verzeichnis generieren ($script_default_key) [Empfohlen]"
         echo "  2) Vorhandenen SSH-Key-Pfad angeben"
-        echo "  3) Ohne SSH-Key (Passwort-Auth via sshpass)"
+        echo "  3) Ohne SSH-Key (Passwort-Authentifizierung)"
         read -rp "Auswahl [1]: " key_menu_choice
         case "${key_menu_choice:-1}" in
             1)
@@ -2079,7 +2083,7 @@ function scan_and_setup_wordpress_sites() {
                 [ "$sftp_host" = "-" ] && sftp_host=""
             fi
             if [ -n "$sftp_host" ]; then
-                read -rp "sftp Port (z.B. 22 oder 23 für Hetzner Storage Box) [${prev_sftp_port:-22}]: " input_sftp_port
+                read -rp "sftp Port [${prev_sftp_port:-22}]: " input_sftp_port
                 sftp_port="${input_sftp_port:-${prev_sftp_port:-22}}"
                 if [ -n "$prev_sftp_user" ]; then
                     read -rp "sftp User [$prev_sftp_user]: " input_sftp_user
@@ -2091,7 +2095,7 @@ function scan_and_setup_wordpress_sites() {
                 sftp_key="$SELECTED_SSH_KEY_PATH"
                 if [ -z "$sftp_key" ]; then
                     if [ -n "$prev_sftp_password" ]; then
-                        read -rsp "sftp Passwort (erfordert 'sshpass', Enter = übernehmen, '-' = leer): " input_sftp_pass
+                        read -rsp "sftp Passwort (Enter = übernehmen, '-' = leer, Eingabe unsichtbar): " input_sftp_pass
                         echo
                         if [ "$input_sftp_pass" = "-" ]; then
                             sftp_password=""
@@ -2099,16 +2103,16 @@ function scan_and_setup_wordpress_sites() {
                             sftp_password="${input_sftp_pass:-$prev_sftp_password}"
                         fi
                     else
-                        read -rsp "sftp Passwort (optional, erfordert 'sshpass', Eingabe unsichtbar): " sftp_password
+                        read -rsp "sftp Passwort (optional, Eingabe unsichtbar): " sftp_password
                         echo
                     fi
                 fi
                 if [ -n "$prev_sftp_directory" ]; then
-                    read -rp "sftp Zielverzeichnis (optional, bei Hetzner Storage Box relativ z.B. 'backups/projekt', '-' = leer) [$prev_sftp_directory]: " input_sftp_dir
+                    read -rp "sftp Zielverzeichnis (optional, z.B. 'backups/projekt', '-' = leer) [$prev_sftp_directory]: " input_sftp_dir
                     sftp_directory="${input_sftp_dir:-$prev_sftp_directory}"
                     [ "$sftp_directory" = "-" ] && sftp_directory=""
                 else
-                    read -rp "sftp Zielverzeichnis (optional, bei Hetzner Storage Box relativ z.B. 'backups/projekt'): " sftp_directory
+                    read -rp "sftp Zielverzeichnis (optional, z.B. 'backups/projekt'): " sftp_directory
                 fi
                 read -rp "Pfad zum lokalen ssh-Binary [${prev_sftp_ssh_bin:-/usr/bin/ssh}]: " input_sftp_ssh_bin
                 sftp_path_to_ssh_binary="${input_sftp_ssh_bin:-${prev_sftp_ssh_bin:-/usr/bin/ssh}}"
@@ -2125,7 +2129,7 @@ function scan_and_setup_wordpress_sites() {
                 [ "$rsync_host" = "-" ] && rsync_host=""
             fi
             if [ -n "$rsync_host" ]; then
-                read -rp "rsync Port (z.B. 22 oder 23 für Hetzner Storage Box) [${prev_rsync_port:-22}]: " input_rsync_port
+                read -rp "rsync Port [${prev_rsync_port:-22}]: " input_rsync_port
                 rsync_port="${input_rsync_port:-${prev_rsync_port:-22}}"
                 if [ -n "$prev_rsync_user" ]; then
                     read -rp "rsync User [$prev_rsync_user]: " input_rsync_user
@@ -2144,7 +2148,7 @@ function scan_and_setup_wordpress_sites() {
                 rsync_key="$SELECTED_SSH_KEY_PATH"
                 if [ -z "$rsync_key" ]; then
                     if [ -n "$prev_rsync_password" ]; then
-                        read -rsp "rsync Passwort (erfordert 'sshpass', Enter = übernehmen, '-' = leer): " input_rsync_pass
+                        read -rsp "rsync Passwort (Enter = übernehmen, '-' = leer, Eingabe unsichtbar): " input_rsync_pass
                         echo
                         if [ "$input_rsync_pass" = "-" ]; then
                             rsync_password=""
@@ -2152,7 +2156,7 @@ function scan_and_setup_wordpress_sites() {
                             rsync_password="${input_rsync_pass:-$prev_rsync_password}"
                         fi
                     else
-                        read -rsp "rsync Passwort (optional, erfordert 'sshpass', Eingabe unsichtbar): " rsync_password
+                        read -rsp "rsync Passwort (optional, Eingabe unsichtbar): " rsync_password
                         echo
                     fi
                 fi
@@ -2402,16 +2406,16 @@ function run_setup_assistant() {
     local sftp_directory=''
     local sftp_path_to_ssh_binary='/usr/bin/ssh'
     if [ "$sftp_host" != "" ]; then
-        read -rp "sftp Port (z.B. 22 oder 23 für Hetzner Storage Box) [22]: " sftp_port
+        read -rp "sftp Port [22]: " sftp_port
         sftp_port=${sftp_port:-22}
         read -rp "sftp User: " sftp_user
         prompt_ssh_key_setup "sftp" "$basename/.ssh/id_ed25519_backup" "$sftp_host" "$sftp_port" "$sftp_user"
         sftp_key="$SELECTED_SSH_KEY_PATH"
         if [ -z "$sftp_key" ]; then
-            read -rsp "sftp Passwort (optional, erfordert 'sshpass', Eingabe unsichtbar): " sftp_password
+            read -rsp "sftp Passwort (optional, Eingabe unsichtbar): " sftp_password
             echo
         fi
-        read -rp "sftp Zielverzeichnis (optional, bei Hetzner Storage Box relativ z.B. 'backups/projekt'): " sftp_directory
+        read -rp "sftp Zielverzeichnis (optional, z.B. 'backups/projekt'): " sftp_directory
         read -rp "Pfad zum lokalen ssh-Binary [/usr/bin/ssh]: " input_sftp_ssh_bin
         sftp_path_to_ssh_binary=${input_sftp_ssh_bin:-/usr/bin/ssh}
     fi
@@ -2425,7 +2429,7 @@ function run_setup_assistant() {
     local rsync_key=''
     local rsync_password=''
     if [ "$rsync_host" != "" ]; then
-        read -rp "rsync Port (z.B. 22 oder 23 für Hetzner Storage Box) [22]: " rsync_port
+        read -rp "rsync Port [22]: " rsync_port
         rsync_port=${rsync_port:-22}
         read -rp "rsync User: " rsync_user
         read -rp "rsync Zielverzeichnis (relativ zum Homeverzeichnis, z.B. 'backups/projekt'): " rsync_directory
@@ -2433,7 +2437,7 @@ function run_setup_assistant() {
         prompt_ssh_key_setup "rsync" "$suggested_rsync_key" "$rsync_host" "$rsync_port" "$rsync_user"
         rsync_key="$SELECTED_SSH_KEY_PATH"
         if [ -z "$rsync_key" ]; then
-            read -rsp "rsync Passwort (optional, erfordert 'sshpass', Eingabe unsichtbar): " rsync_password
+            read -rsp "rsync Passwort (optional, Eingabe unsichtbar): " rsync_password
             echo
         fi
     fi
@@ -4033,24 +4037,20 @@ function run_backup_for_project() {
         echo " lokaler Ordner: $backup_destiantion" | tee -a "$log_file_name"
         echo " entfernter Ordner: $rsync_directory" | tee -a "$log_file_name"
         local rsync_ssh_cmd="ssh -p $rsync_port -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new"
-        local rsync_status=0
         if [ -n "$rsync_key" ]; then
-            rsync_ssh_cmd="$rsync_ssh_cmd -i '$rsync_key' -o PubkeyAuthentication=yes -o BatchMode=yes"
-            rsync -rltDvzr -e "$rsync_ssh_cmd" --exclude='.htaccess' --progress "$backup_destiantion" "$rsync_user@$rsync_host:$rsync_directory" 2>&1 | tee -a "$log_file_name"
-            rsync_status="${PIPESTATUS[0]}"
+            rsync_ssh_cmd="$rsync_ssh_cmd -i '$rsync_key' -o PubkeyAuthentication=yes"
+            [ -z "$rsync_password" ] && rsync_ssh_cmd="$rsync_ssh_cmd -o BatchMode=yes"
         elif [ -n "$rsync_password" ]; then
-            if ! command -v sshpass >/dev/null 2>&1; then
-                echo "Fehler: 'sshpass' ist nicht installiert (für RSYNC_PASSWORD benötigt). Alternativ SSH-Key über RSYNC_KEY verwenden." | tee -a "$log_file_name" >&2
-                rsync_status=1
-            else
-                SSHPASS="$rsync_password" sshpass -e rsync -rltDvzr -e "$rsync_ssh_cmd" --exclude='.htaccess' --progress "$backup_destiantion" "$rsync_user@$rsync_host:$rsync_directory" 2>&1 | tee -a "$log_file_name"
-                rsync_status="${PIPESTATUS[0]}"
-            fi
+            rsync_ssh_cmd="$rsync_ssh_cmd -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1"
         else
             rsync_ssh_cmd="$rsync_ssh_cmd -o BatchMode=yes"
-            rsync -rltDvzr -e "$rsync_ssh_cmd" --exclude='.htaccess' --progress "$backup_destiantion" "$rsync_user@$rsync_host:$rsync_directory" 2>&1 | tee -a "$log_file_name"
-            rsync_status="${PIPESTATUS[0]}"
         fi
+        if [ -n "$rsync_password" ]; then
+            run_with_ssh_password "$rsync_password" rsync -rltDvzr -e "$rsync_ssh_cmd" --exclude='.htaccess' --progress "$backup_destiantion" "$rsync_user@$rsync_host:$rsync_directory" 2>&1 | tee -a "$log_file_name"
+        else
+            rsync -rltDvzr -e "$rsync_ssh_cmd" --exclude='.htaccess' --progress "$backup_destiantion" "$rsync_user@$rsync_host:$rsync_directory" 2>&1 | tee -a "$log_file_name"
+        fi
+        local rsync_status="${PIPESTATUS[0]}"
 
         # Wurden die Daten übertragen?
         if [ "$rsync_status" -eq 0 ]
@@ -4098,24 +4098,20 @@ function run_backup_for_project() {
 
         # hier ist der eigentliche upload auf den backup-server
         local sftp_upload_opts=(-o "Port=$sftp_port" -o "ConnectTimeout=15" -o "StrictHostKeyChecking=accept-new")
-        local sftp_status=0
         if [ -n "$sftp_key" ]; then
-            sftp_upload_opts+=(-o "PubkeyAuthentication=yes" -o "IdentityFile=$sftp_key" -o "BatchMode=yes")
-            sftp ${sftp_path_to_ssh_binary:+-S "$sftp_path_to_ssh_binary"} "${sftp_upload_opts[@]}" -b "$sftp_batchfile" "$sftp_user@$sftp_host" 2>&1 | tee -a "$log_file_name"
-            sftp_status="${PIPESTATUS[0]}"
+            sftp_upload_opts+=(-o "PubkeyAuthentication=yes" -o "IdentityFile=$sftp_key")
+            [ -z "$sftp_password" ] && sftp_upload_opts+=(-o "BatchMode=yes")
         elif [ -n "$sftp_password" ]; then
-            if ! command -v sshpass >/dev/null 2>&1; then
-                echo "Fehler: 'sshpass' ist nicht installiert (für SFTP_PASSWORD benötigt). Alternativ SSH-Key über SFTP_KEY verwenden." | tee -a "$log_file_name" >&2
-                sftp_status=1
-            else
-                SSHPASS="$sftp_password" sshpass -e sftp ${sftp_path_to_ssh_binary:+-S "$sftp_path_to_ssh_binary"} "${sftp_upload_opts[@]}" -b "$sftp_batchfile" "$sftp_user@$sftp_host" 2>&1 | tee -a "$log_file_name"
-                sftp_status="${PIPESTATUS[0]}"
-            fi
+            sftp_upload_opts+=(-o "PubkeyAuthentication=no" -o "NumberOfPasswordPrompts=1")
         else
             sftp_upload_opts+=(-o "BatchMode=yes")
-            sftp ${sftp_path_to_ssh_binary:+-S "$sftp_path_to_ssh_binary"} "${sftp_upload_opts[@]}" -b "$sftp_batchfile" "$sftp_user@$sftp_host" 2>&1 | tee -a "$log_file_name"
-            sftp_status="${PIPESTATUS[0]}"
         fi
+        if [ -n "$sftp_password" ]; then
+            run_with_ssh_password "$sftp_password" sftp ${sftp_path_to_ssh_binary:+-S "$sftp_path_to_ssh_binary"} "${sftp_upload_opts[@]}" -b "$sftp_batchfile" "$sftp_user@$sftp_host" 2>&1 | tee -a "$log_file_name"
+        else
+            sftp ${sftp_path_to_ssh_binary:+-S "$sftp_path_to_ssh_binary"} "${sftp_upload_opts[@]}" -b "$sftp_batchfile" "$sftp_user@$sftp_host" 2>&1 | tee -a "$log_file_name"
+        fi
+        local sftp_status="${PIPESTATUS[0]}"
 
         # Wurden die Daten übertragen?
         if [ "$sftp_status" -eq 0 ]

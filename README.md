@@ -27,7 +27,7 @@ Die Einrichtung auf einem neuen Shared-Hosting-Account oder Server erfolgt in dr
    ```bash
    ./update_wp.sh --setup
    ```
-   *Prüft PHP-CLI und Tools, richtet die zentrale Gotenberg-9-Verbindung (`.gotenberg`) ein, lädt bei Bedarf WP-CLI automatisch nach `./bin/` herunter (inkl. SHA-512 Prüfung) und erzeugt `.update.<projekt>` mit Prüfpfaden, Blognamen und Rollback-Vorgaben.*
+   *Prüft PHP-CLI und Tools, richtet die zentrale Gotenberg-9-Verbindung (`.gotenberg`) ein, lädt bei Bedarf WP-CLI automatisch nach `./bin/` herunter (inkl. SHA-512 Prüfung) und erzeugt `.update.<projekt>` mit automatisch ermitteltem Startseiten-Text (`MUST_CONTAIN`), Prüf-/Screenshot-Pfaden aus der XML-Sitemap und Rollback-Vorgaben.*
 
 Fertig! Danach können Backups und Updates jederzeit interaktiv per Menü oder automatisiert per CLI/SSH aufgerufen werden:
 ```bash
@@ -95,6 +95,11 @@ Skript zur sicheren Durchführung von WordPress Core-, Plugin-, Theme- und Sprac
   - Multi-Viewport (Desktop `1440px`, Mobile `390px`), `waitDelay`, Cookies und Ignore-Bereiche (`SCREENSHOT_IGNORE_RECTS`)
   - Ampel-Schwellenwerte: $< 1.0\,\%$ GRÜN, $1.0 - 5.0\,\%$ GELB, $> 5.0\,\%$ ROT
   - Fällt Gotenberg aus, bricht das Update nicht ab, sondern meldet kontrolliert GELB
+- **Setup-Assistent (`--setup`)**:
+  - Ermittelt `SITE_URL` automatisch per WP-CLI (`wp option get siteurl`)
+  - Ermittelt `MUST_CONTAIN` direkt aus dem ausgelieferten Startseiten-HTML (bevorzugt `blogname` falls exakt im Quelltext vorhanden, sonst `<h1>`, `<title>`-Segment, `og:site_name` oder sichtbaren Body-Text), damit die `grep -F`-Prüfung zuverlässig greift
+  - Liest `CHECK_PATHS` und `SCREENSHOT_PATHS` automatisch aus der Website-Sitemap (`robots.txt`, `/wp-sitemap.xml`, `/sitemap_index.xml`, `/sitemap.xml` inkl. Sitemap-Index mit Bevorzugung von `page`-Sitemaps; Fallback: `/ /kontakt/ /impressum/`)
+  - Lässt `SKIP_PLUGINS` standardmäßig leer (`keine`), damit keine regulären Plugins versehentlich von Sicherheitsupdates ausgeschlossen werden (`SKIP_PLUGINS` ist nur für bewusste manuelle Ausnahmen gedacht)
 - **Sicherer Ablauf pro Projekt (`--project=<name>|alle`)**:
   1. Lock-Datei pro Projekt verhindert parallele Ausführung
   2. **Vorprüfung**: `wp core is-installed`, kein Wartungsmodus, HTTP-Status 200 auf allen Prüfseiten und Vorkommen von `MUST_CONTAIN` auf der Startseite. Bei Vorfehlern sofortiger Abbruch (ROT = "schon vorher defekt")

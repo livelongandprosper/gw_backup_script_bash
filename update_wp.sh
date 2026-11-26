@@ -770,7 +770,7 @@ MUST_CONTAIN='$quoted_must_contain'
 # Pfade, die vor und nach dem Update per HTTP geprüft werden müssen (durch Leerzeichen getrennt)
 CHECK_PATHS='$quoted_check_paths'
 
-# Plugins, die beim automatischen Update ausgeschlossen werden sollen (z. B. kommerzielle Plugins)
+# Plugins, die beim automatischen Update ausgeschlossen werden sollen (optional, durch Leerzeichen getrennt)
 SKIP_PLUGINS='$quoted_skip_plugins'
 
 # Maximales Alter eines vorhandenen Backups in Minuten, falls kein neues erstellt wird (Standard: 60)
@@ -916,12 +916,12 @@ function run_setup_wizard() {
         local current_wp_path=""
         local current_site_url=""
         local current_must_contain=""
-        local current_check_paths="/ /kontakt/ /impressum/"
+        local current_check_paths=""
         local current_skip_plugins=""
         local current_max_age="60"
         local current_backup_first="yes"
         local current_enable_screenshots="yes"
-        local current_screenshot_paths="/ /kontakt/ /impressum/"
+        local current_screenshot_paths=""
         local current_screenshot_widths="1440 390"
         local current_screenshot_wait="2s"
         local current_screenshot_cookies=""
@@ -958,31 +958,49 @@ function run_setup_wizard() {
         current_wp_path="$(resolve_dir_path "$current_wp_path" "$basename")"
 
         # Falls WordPress-Pfad existiert, Werte per WP-CLI / wp-config ermitteln
+        local detected_siteurl=""
+        local detected_blogname=""
         if [ -d "$current_wp_path" ]; then
-            local detected_siteurl=""
-            local detected_blogname=""
-
             detected_siteurl=$(run_wp option get siteurl --path="$current_wp_path" --skip-plugins --skip-themes 2>/dev/null)
             detected_blogname=$(run_wp option get blogname --path="$current_wp_path" --skip-plugins --skip-themes 2>/dev/null)
 
             if [ -n "$detected_siteurl" ]; then
                 current_site_url="${current_site_url:-$detected_siteurl}"
             fi
-            if [ -n "$detected_blogname" ]; then
-                current_must_contain="${current_must_contain:-$detected_blogname}"
-            fi
-
-            # Vorschlag für SKIP_PLUGINS: Plugins ohne Update-Quelle / kommerziell
-            if [ -z "$current_skip_plugins" ]; then
-                local commercial_plugins
-                commercial_plugins=$(run_wp plugin list --path="$current_wp_path" --skip-plugins --skip-themes --format=csv --fields=name,update 2>/dev/null | grep -iE '(none|custom|disabled)' | cut -d, -f1 | tr '\n' ' ')
-                current_skip_plugins=$(echo "$commercial_plugins" | xargs 2>/dev/null || true)
-            fi
         fi
 
         read -rp "Website-URL (SITE_URL) [${current_site_url:-https://$proj.de}]: " in_site_url
         current_site_url="${in_site_url:-${current_site_url:-https://$proj.de}}"
         [ -z "$first_configured_url" ] && first_configured_url="$current_site_url"
+
+        if [ -z "$current_must_contain" ]; then
+            echo "Ermittle Textvorschlag (MUST_CONTAIN) von '$current_site_url' ..."
+            local detected_must_contain
+            detected_must_contain=$(detect_must_contain_from_url "$current_site_url" "$detected_blogname")
+            if [ -n "$detected_must_contain" ]; then
+                current_must_contain="$detected_must_contain"
+                echo "-> Ermittelter Text: $current_must_contain"
+            elif [ -n "$detected_blogname" ]; then
+                current_must_contain="$detected_blogname"
+            fi
+        fi
+
+        if [ -z "$current_check_paths" ]; then
+            echo "Suche Prüfseiten in der Sitemap von '$current_site_url' ..."
+            local detected_sitemap_paths
+            detected_sitemap_paths=$(detect_check_paths_from_sitemap "$current_site_url")
+            if [ -n "$detected_sitemap_paths" ]; then
+                current_check_paths="$detected_sitemap_paths"
+                echo "-> Aus Sitemap ermittelt: $current_check_paths"
+            else
+                current_check_paths="/ /kontakt/ /impressum/"
+                echo "-> Keine Sitemap gefunden, nutze Standardpfade: $current_check_paths"
+            fi
+        fi
+
+        if [ -z "$current_screenshot_paths" ]; then
+            current_screenshot_paths="$current_check_paths"
+        fi
 
         read -rp "Erforderlicher Text auf der Startseite (MUST_CONTAIN) [${current_must_contain:-$proj}]: " in_must_contain
         current_must_contain="${in_must_contain:-${current_must_contain:-$proj}}"
@@ -1086,6 +1104,287 @@ function check_http_endpoint() {
     HTTP_CHECK_STATUS="${status_code:-000}"
     HTTP_CHECK_MS="${time_ms:-0}"
     HTTP_CHECK_BODY="$body_content"
+}
+
+# Lädt eine beliebige URL (z. B. Sitemap) bei HTTP 200 herunter und gibt den Body auf stdout aus
+function fetch_url_body() {
+    local target_url="$1"
+    local temp_body
+    temp_body="$(mktemp "/tmp/wp_update_fetch_XXXXXX" 2>/dev/null || echo "/tmp/wp_update_fetch_$$.tmp")"
+    local status_code="000"
+
+    if command -v curl >/dev/null 2>&1; then
+        status_code=$(curl -s -S -L -k --max-time 15 -w "%{http_code}" -o "$temp_body" "$target_url" 2>/dev/null)
+    elif command -v wget >/dev/null 2>&1; then
+        status_code=$(wget -q --server-response --no-check-certificate -O "$temp_body" "$target_url" 2>&1 | awk '/^  HTTP/{print $2}' | tail -n 1)
+    fi
+
+    if [ "$status_code" = "200" ] && [ -s "$temp_body" ]; then
+        cat "$temp_body" 2>/dev/null
+        rm -f "$temp_body"
+        return 0
+    fi
+
+    rm -f "$temp_body"
+    return 1
+}
+
+# Ermittelt aus dem HTML einer Website einen zuverlässig im Quelltext vorhandenen Text für MUST_CONTAIN
+function detect_must_contain_from_html() {
+    local html_file="$1"
+    local fallback_blogname="${2:-}"
+
+    [ -f "$html_file" ] && [ -s "$html_file" ] || return 1
+
+    if command -v php >/dev/null 2>&1; then
+        local php_script='
+            $html = @file_get_contents($argv[1]);
+            $blogname = trim($argv[2] ?? "");
+            if ($html === false || $html === "") { exit(1); }
+
+            $is_valid = function($candidate) use ($html) {
+                $candidate = trim($candidate);
+                $len = function_exists("mb_strlen") ? mb_strlen($candidate, "UTF-8") : strlen($candidate);
+                if ($len < 3 || $len > 80) return false;
+                if (preg_match("/[\r\n\t<>]/", $candidate)) return false;
+                return strpos($html, $candidate) !== false;
+            };
+
+            // 1. Falls blogname exakt im HTML vorkommt, direkt übernehmen
+            if ($blogname !== "" && $is_valid($blogname)) {
+                echo $blogname;
+                exit(0);
+            }
+
+            // 2. Erste passende <h1>-Überschrift prüfen
+            if (preg_match_all("/<h1\b[^>]*>(.*?)<\/h1>/is", $html, $h1_matches)) {
+                foreach ($h1_matches[1] as $raw_h1) {
+                    $clean_h1 = trim(preg_replace("/\s+/u", " ", strip_tags($raw_h1)));
+                    if ($is_valid($clean_h1)) {
+                        echo $clean_h1;
+                        exit(0);
+                    }
+                }
+            }
+
+            // 3. <title>-Tag (oder sauberes Segment daraus) prüfen
+            if (preg_match("/<title\b[^>]*>(.*?)<\/title>/is", $html, $title_match)) {
+                $raw_title = trim(preg_replace("/\s+/u", " ", $title_match[1]));
+                if ($is_valid($raw_title)) {
+                    echo $raw_title;
+                    exit(0);
+                }
+                foreach (preg_split("/\s*(?:\||–|—|-|&[a-zA-Z0-9#]+;)\s*/u", $raw_title) as $part) {
+                    if ($is_valid($part)) {
+                        echo $part;
+                        exit(0);
+                    }
+                }
+            }
+
+            // 4. og:site_name / application-name Meta-Tags prüfen
+            if (preg_match_all("/<meta\b[^>]+(?:property=[\"\x27]og:site_name[\"\x27]|name=[\"\x27]application-name[\"\x27])[^>]*content=[\"\x27]([^\"\x27]+)[\"\x27]/is", $html, $meta_matches)) {
+                foreach ($meta_matches[1] as $mval) {
+                    if ($is_valid($mval)) {
+                        echo $mval;
+                        exit(0);
+                    }
+                }
+            }
+
+            // 5. Sichtbare Textzeilen aus dem <body> prüfen
+            $body = $html;
+            if (preg_match("/<body\b[^>]*>(.*)<\/body>/is", $html, $bm)) {
+                $body = $bm[1];
+            }
+            $body = preg_replace("/<(script|style|noscript|svg|template)\b[^>]*>.*?<\/\1>/is", "\n", $body);
+            $body = preg_replace("/<!--.*?-->/s", "\n", $body);
+            $body = preg_replace("/<\/(?:p|div|h[1-6]|li|a|span|footer|header|section|article|main)>/i", "\n", $body);
+            $text = strip_tags($body);
+            foreach (preg_split("/\r?\n/", $text) as $line) {
+                $line = trim(preg_replace("/[ \t]+/", " ", $line));
+                if (preg_match("/[a-zA-ZäöüÄÖÜß]{3,}/u", $line) && $is_valid($line)) {
+                    echo $line;
+                    exit(0);
+                }
+            }
+
+            exit(1);
+        '
+        php -r "$php_script" "$html_file" "$fallback_blogname" 2>/dev/null
+        return $?
+    fi
+
+    return 1
+}
+
+function detect_must_contain_from_url() {
+    local site_url="$1"
+    local fallback_blogname="${2:-}"
+    local temp_html
+    temp_html="$(mktemp "/tmp/wp_update_home_XXXXXX" 2>/dev/null || echo "/tmp/wp_update_home_$$.tmp")"
+
+    if fetch_url_body "${site_url%/}/" > "$temp_html"; then
+        local detected_text
+        detected_text=$(detect_must_contain_from_html "$temp_html" "$fallback_blogname")
+        rm -f "$temp_html"
+        if [ -n "$detected_text" ]; then
+            printf '%s' "$detected_text"
+            return 0
+        fi
+    fi
+
+    rm -f "$temp_html"
+    return 1
+}
+
+# Extrahiert <loc>-URLs aus einem Sitemap-XML (URL-Set oder Sitemap-Index)
+function parse_sitemap_locs() {
+    local xml_file="$1"
+    [ -f "$xml_file" ] && [ -s "$xml_file" ] || return 1
+
+    if command -v php >/dev/null 2>&1; then
+        local php_script='
+            $xml = @file_get_contents($argv[1]);
+            if ($xml === false || $xml === "") exit(1);
+            $type = "unknown";
+            if (stripos($xml, "<sitemapindex") !== false) {
+                $type = "index";
+            } elseif (stripos($xml, "<urlset") !== false) {
+                $type = "urlset";
+            } else {
+                exit(1);
+            }
+            if (!preg_match_all("/<loc>\s*(?:<!\[CDATA\[)?\s*(.*?)\s*(?:\]\]>)?\s*<\/loc>/is", $xml, $m)) {
+                exit(1);
+            }
+            echo $type . "\n";
+            foreach ($m[1] as $loc) {
+                $loc = trim(html_entity_decode($loc, ENT_QUOTES | ENT_XML1, "UTF-8"));
+                if ($loc !== "") echo $loc . "\n";
+            }
+        '
+        php -r "$php_script" "$xml_file" 2>/dev/null
+        return $?
+    fi
+    return 1
+}
+
+# Ermittelt bis zu 5 sinnvolle HTTP-Prüfpfade (inkl. '/') aus der Sitemap der Website
+function detect_check_paths_from_sitemap() {
+    local site_url="$1"
+    local base="${site_url%/}"
+    local candidate_sitemaps=()
+
+    # 1. robots.txt nach Sitemap-Einträgen durchsuchen
+    local robots_body
+    robots_body=$(fetch_url_body "$base/robots.txt" 2>/dev/null || true)
+    if [ -n "$robots_body" ]; then
+        while IFS= read -r sm_url; do
+            sm_url=$(echo "$sm_url" | tr -d '\r' | xargs 2>/dev/null || true)
+            [ -n "$sm_url" ] && candidate_sitemaps+=("$sm_url")
+        done < <(echo "$robots_body" | sed -nE 's/^[Ss][Ii][Tt][Ee][Mm][Aa][Pp]:[[:space:]]*([^[:space:]]+).*/\1/p')
+    fi
+
+    # 2. Typische WordPress- und SEO-Sitemap-Pfade ergänzen
+    local std_sm
+    for std_sm in "$base/wp-sitemap.xml" "$base/sitemap_index.xml" "$base/sitemap.xml"; do
+        local already="false"
+        local existing
+        for existing in "${candidate_sitemaps[@]}"; do
+            if [ "$existing" = "$std_sm" ]; then
+                already="true"
+                break
+            fi
+        done
+        [ "$already" = "false" ] && candidate_sitemaps+=("$std_sm")
+    done
+
+    local collected_urls=()
+    local tmp_xml
+    tmp_xml="$(mktemp "/tmp/wp_update_sm_XXXXXX" 2>/dev/null || echo "/tmp/wp_update_sm_$$.tmp")"
+
+    for sm in "${candidate_sitemaps[@]}"; do
+        if fetch_url_body "$sm" > "$tmp_xml" 2>/dev/null; then
+            local parsed
+            parsed=$(parse_sitemap_locs "$tmp_xml" 2>/dev/null || true)
+            if [ -n "$parsed" ]; then
+                local sm_type
+                sm_type=$(echo "$parsed" | head -n 1)
+                if [ "$sm_type" = "urlset" ]; then
+                    while IFS= read -r u; do
+                        [ -n "$u" ] && collected_urls+=("$u")
+                    done < <(echo "$parsed" | tail -n +2)
+                    break
+                elif [ "$sm_type" = "index" ]; then
+                    # Bei Sitemap-Index bevorzugt Seiten-Sitemaps (page) laden, max. 3 Kind-Sitemaps
+                    local child_sitemaps_priority=()
+                    local child_sitemaps_other=()
+                    while IFS= read -r child_u; do
+                        [ -z "$child_u" ] && continue
+                        if echo "$child_u" | grep -qi "page"; then
+                            child_sitemaps_priority+=("$child_u")
+                        else
+                            child_sitemaps_other+=("$child_u")
+                        fi
+                    done < <(echo "$parsed" | tail -n +2)
+
+                    local ordered_children=("${child_sitemaps_priority[@]}" "${child_sitemaps_other[@]}")
+                    local fetched_children=0
+                    local child
+                    for child in "${ordered_children[@]}"; do
+                        [ "$fetched_children" -ge 3 ] && break
+                        if fetch_url_body "$child" > "$tmp_xml" 2>/dev/null; then
+                            local child_parsed
+                            child_parsed=$(parse_sitemap_locs "$tmp_xml" 2>/dev/null || true)
+                            if [ -n "$child_parsed" ] && [ "$(echo "$child_parsed" | head -n 1)" = "urlset" ]; then
+                                while IFS= read -r u; do
+                                    [ -n "$u" ] && collected_urls+=("$u")
+                                done < <(echo "$child_parsed" | tail -n +2)
+                                fetched_children=$((fetched_children + 1))
+                            fi
+                        fi
+                    done
+                    [ "${#collected_urls[@]}" -gt 0 ] && break
+                fi
+            fi
+        fi
+    done
+
+    rm -f "$tmp_xml"
+
+    [ "${#collected_urls[@]}" -eq 0 ] && return 1
+
+    if command -v php >/dev/null 2>&1; then
+        local php_filter='
+            $baseUrl = $argv[1];
+            $baseHost = strtolower(preg_replace("/^www\./i", "", parse_url($baseUrl, PHP_URL_HOST) ?? ""));
+            $urls = array_slice($argv, 2);
+            $paths = ["/"];
+            $seen = ["/" => true];
+            foreach ($urls as $u) {
+                $p = parse_url(trim($u));
+                if (!$p) continue;
+                $h = strtolower(preg_replace("/^www\./i", "", $p["host"] ?? ""));
+                if ($baseHost !== "" && $h !== "" && $h !== $baseHost) continue;
+                $path = $p["path"] ?? "/";
+                if ($path === "" || $path[0] !== "/") $path = "/" . $path;
+                if ($path === "/" || $path === "") continue;
+                if (preg_match("/\.(xml|jpg|jpeg|png|gif|webp|svg|pdf|zip)$/i", $path)) continue;
+                if (preg_match("#^/(wp-content|wp-includes|wp-json|feed)/#i", $path)) continue;
+                if (!isset($seen[$path])) {
+                    $seen[$path] = true;
+                    $paths[] = $path;
+                    if (count($paths) >= 5) break;
+                }
+            }
+            if (count($paths) <= 1) exit(1);
+            echo implode(" ", $paths);
+        '
+        php -r "$php_filter" "$site_url" "${collected_urls[@]}" 2>/dev/null
+        return $?
+    fi
+    return 1
 }
 
 ################################

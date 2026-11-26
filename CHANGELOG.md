@@ -44,6 +44,10 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
 - Korrigierte Argumentverschiebung beim WordPress-Scan, die Backup-Konfigurationswerte und Datenbankzugänge in falsche Variablen schrieb; ungültige oder verschobene Werte werden nun erkannt.
 - Backup- und Update-Konfigurationen escapen Shell-Sonderzeichen sicher; Projektwerte werden vor dem Laden zurückgesetzt und bestehende Scan-Konfigurationen nur nach Rückfrage überschrieben.
 - Fehlerbehandlung für Projektauswahl, JSON-Ausgabe, Retention-Eingaben, Plugin-Ausschlüsse, Update-Rückgabecodes und fehlende Backup-Konfiguration verbessert.
+- **Setup-Assistent in `update_wp.sh` korrigiert & erweitert:**
+  - Automatischen Vorschlag für `SKIP_PLUGINS` entfernt (`--skip-plugins` + `grep -E '(none|custom|disabled)'` schlug fälschlich alle aktuellen WordPress.org-Plugins zum Ausschluss vor); `SKIP_PLUGINS` bleibt bei der Einrichtung nun standardmäßig leer.
+  - Automatische Ermittlung von `MUST_CONTAIN` aus dem tatsächlichen HTML der Startseite (`detect_must_contain_from_url()` / `detect_must_contain_from_html()`), sodass nur real im Quelltext enthaltene Texte vorgeschlagen werden.
+  - Automatische Ermittlung von `CHECK_PATHS` und `SCREENSHOT_PATHS` aus der Sitemap (`detect_check_paths_from_sitemap()` über `robots.txt`, `/wp-sitemap.xml`, `/sitemap_index.xml`, `/sitemap.xml` inkl. Sitemap-Index), mit Fallback auf `/ /kontakt/ /impressum/`.
 
 ---
 

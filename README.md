@@ -145,18 +145,12 @@ fragt (Datenbank(en), Zielordner, optional sftp/rsync, Standard-Umfang) und dara
 `.env.<projektname>`-Datei anlegt (Zugriffsrechte 600). Bei jedem weiteren Aufruf wird
 diese Datei einfach eingelesen, es muss nichts mehr manuell im Skript eingetragen werden.
 
-Eine bereits bestehende einzelne `.env`-Datei (ohne Projektnamen, aus einer älteren
-Skript-Version) wird weiterhin automatisch als Projekt `default` unterstützt.
-
 Beim Datenbank-Setup wird so lange nach weiteren Datenbanken gefragt, bis der
 Datenbankname leer gelassen wird – es können also beliebig viele Datenbanken pro
-Projekt konfiguriert werden (in der `.env`-Datei als `DB_COUNT` und `DB_1_*`, `DB_2_*`,
-... gespeichert). Ältere `.env`-Dateien im bisherigen `DB_*`/`DB2_*`-Format werden
-weiterhin automatisch unterstützt, ohne dass der Setup-Assistent erneut
-durchlaufen werden muss.
+Projekt konfiguriert werden (in der `.env.<projektname>`-Datei als `DB_COUNT` und `DB_1_*`, `DB_2_*`, ... gespeichert).
 
 Eine `.env.example` liegt als Referenz bei, welche Werte konfiguriert werden können.
-`.env`- und `.env.<projektname>`-Dateien enthalten Zugangsdaten und sind über
+`.env.<projektname>`-Dateien enthalten Zugangsdaten und sind über
 `.gitignore` von der Versionsverwaltung ausgeschlossen – sie sollten niemals
 eingecheckt werden.
 
@@ -307,4 +301,4 @@ Das Skript ist so konzipiert, dass es sowohl **außerhalb des Webroots** (empfoh
    - Archivierung via `zip -y` (symbolische Links werden als Symlinks erhalten und führen nicht zu Endlosschleifen oder doppeltem Packen).
    - Umfassende Standard-Ausschlüsse für WordPress (Caches, Updraft-/Ai1wm-/BackupBuddy-Archive, Debug-/Error-Logs, Wordfence-Logs, `.DS_Store`, `node_modules`).
    - Dateilisten für sftp werden sicher per Shell-Globbing verarbeitet (kein fehleranfälliges `ls`-Parsing bei Leer- oder Sonderzeichen).
-   - Bereinigungen nach erfolgreicher Übertragung (`delete_if_transmitted`) sowie das Löschen veralteter Backups (`backup_live_time`) erfolgen gezielt über `find` unter Ausschluss der Schutzdateien (`.htaccess`).
+   - Bereinigungen nach erfolgreicher Übertragung (`DELETE_IF_TRANSMITTED`) sowie die Aufbewahrungsbereinigung (`RETENTION_MODE` / `staffel` / `tage`) erfolgen gezielt unter Ausschluss der Schutzdateien (`.htaccess`).

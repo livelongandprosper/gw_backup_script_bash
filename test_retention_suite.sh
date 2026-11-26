@@ -49,7 +49,6 @@ KEEP_WEEKLY_DAYS=90
 KEEP_MONTHLY_DAYS=365
 KEEP_MIN_SETS=3
 RETENTION_REMOTE='no'
-BACKUP_LIVE_TIME='0'
 DELETE_IF_TRANSMITTED='false'
 EOF
 
@@ -192,13 +191,13 @@ touch "$T3_DIR/proj3/fremdprojekt_2020-01-01_03-00-00_files.zip"
 echo "OK"
 
 # -------------------------------------------------------------
-# Test 5: Abwärtskompatibilität bestehender .env
+# Test 5: Retention-Modi 'aus' und 'tage'
 # -------------------------------------------------------------
-echo -n "[Test 5] Abwärtskompatibilität (.env ohne RETENTION_MODE) ... "
+echo -n "[Test 5] Retention-Modi 'aus' und 'tage' ... "
 T5_DIR="$TEST_TMP/t5_project"
 mkdir -p "$T5_DIR/proj5a" "$T5_DIR/log" "$T5_DIR/status"
 
-# Fall A: BACKUP_LIVE_TIME=0 -> Modus 'aus'
+# Fall A: RETENTION_MODE='aus'
 cat << 'EOF' > "$T5_DIR/.env.proj5a"
 PROJECT_NAME='proj5a'
 PROJEKT_BASIS_DATEINAME='proj5a'
@@ -206,7 +205,7 @@ DEFAULT_SCOPE='alles'
 DB_COUNT='1'
 DB_1_NAME='maindb'
 SOURCE_FILES_DIR='/tmp'
-BACKUP_LIVE_TIME='0'
+RETENTION_MODE='aus'
 EOF
 
 ts_old1="2020-01-01_03-00-00"
@@ -220,7 +219,7 @@ create_synthetic_set "$T5_DIR/proj5a" "proj5a" "$ts_old1" 1 1
 
 [ -f "$T5_DIR/proj5a/proj5a_${ts_old1}_maindb.sql.zip" ] || { echo "FAILED: Modus 'aus' deleted old backup!"; exit 1; }
 
-# Fall B: BACKUP_LIVE_TIME=14 -> Modus 'tage' mit 14 Tagen
+# Fall B: RETENTION_MODE='tage' mit KEEP_DAILY_DAYS=14
 cat << 'EOF' > "$T5_DIR/.env.proj5b"
 PROJECT_NAME='proj5b'
 PROJEKT_BASIS_DATEINAME='proj5b'
@@ -228,7 +227,8 @@ DEFAULT_SCOPE='alles'
 DB_COUNT='1'
 DB_1_NAME='maindb'
 SOURCE_FILES_DIR='/tmp'
-BACKUP_LIVE_TIME='14'
+RETENTION_MODE='tage'
+KEEP_DAILY_DAYS=14
 KEEP_MIN_SETS=1
 EOF
 
@@ -256,23 +256,24 @@ echo -n "[Test 6] Konvertierung nach 'staffel' mit .bak Sicherung ... "
 T6_DIR="$TEST_TMP/t6_project"
 mkdir -p "$T6_DIR"
 
-cat << 'EOF' > "$T6_DIR/.env.legacy"
-PROJECT_NAME='legacy'
-PROJEKT_BASIS_DATEINAME='legacy'
+cat << 'EOF' > "$T6_DIR/.env.tage_zu_staffel"
+PROJECT_NAME='tage_zu_staffel'
+PROJEKT_BASIS_DATEINAME='tage_zu_staffel'
 DEFAULT_SCOPE='alles'
-BACKUP_LIVE_TIME='14'
+RETENTION_MODE='tage'
+KEEP_DAILY_DAYS=14
 EOF
 
 (
     cd "$T6_DIR"
     source "$MAIN_SCRIPT" --source-only
-    convert_project_env_to_staffel "$T6_DIR/.env.legacy"
+    convert_project_env_to_staffel "$T6_DIR/.env.tage_zu_staffel"
 )
 
-[ -f "$T6_DIR/.env.legacy.bak" ] || { echo "FAILED: .bak file not created!"; exit 1; }
-grep -q "BACKUP_LIVE_TIME='14'" "$T6_DIR/.env.legacy.bak" || { echo "FAILED: .bak content incorrect!"; exit 1; }
-grep -q "RETENTION_MODE='staffel'" "$T6_DIR/.env.legacy" || { echo "FAILED: RETENTION_MODE not added to converted file!"; exit 1; }
-grep -q "KEEP_DAILY_DAYS=14" "$T6_DIR/.env.legacy" || { echo "FAILED: KEEP_DAILY_DAYS not preserved from BACKUP_LIVE_TIME!"; exit 1; }
+[ -f "$T6_DIR/.env.tage_zu_staffel.bak" ] || { echo "FAILED: .bak file not created!"; exit 1; }
+grep -q "RETENTION_MODE='tage'" "$T6_DIR/.env.tage_zu_staffel.bak" || { echo "FAILED: .bak content incorrect!"; exit 1; }
+grep -q "RETENTION_MODE='staffel'" "$T6_DIR/.env.tage_zu_staffel" || { echo "FAILED: RETENTION_MODE not added to converted file!"; exit 1; }
+grep -q "KEEP_DAILY_DAYS=14" "$T6_DIR/.env.tage_zu_staffel" || { echo "FAILED: KEEP_DAILY_DAYS not preserved!"; exit 1; }
 
 echo "OK"
 

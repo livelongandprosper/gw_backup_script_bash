@@ -532,14 +532,9 @@ function suggest_project_name_from_wp() {
 # Hilfsfunktion: liest den Projektnamen aus einer .env-Datei-Pfadangabe ab
 function project_name_from_env_file() {
     local file="$1"
-    local legacy_env="${2:-$basename/.env}"
-    if [ "$file" == "$legacy_env" ]; then
-        echo "default"
-    else
-        local file_basename
-        file_basename="$(basename "$file")"
-        echo "${file_basename#.env.}"
-    fi
+    local file_basename
+    file_basename="$(basename "$file")"
+    echo "${file_basename#.env.}"
 }
 
 # Projekt-Konfigurationsdateien des Backup-Skripts ermitteln
@@ -557,12 +552,6 @@ function refresh_env_files() {
             env_files+=("$candidate_env_file")
         fi
     done
-
-    # Abwärtskompatibilität: eine einzelne alte .env-Datei (ohne Projektnamen) wird als "default"-Projekt behandelt
-    legacy_env_file="$script_dir/.env"
-    if [ -f "$legacy_env_file" ]; then
-        env_files+=("$legacy_env_file")
-    fi
 }
 
 ################################
@@ -1945,22 +1934,9 @@ function run_update_for_project() {
     SCREENSHOT_DIFF_THRESHOLD_WARN="1.0"
     SCREENSHOT_DIFF_THRESHOLD_FAIL="5.0"
 
-    local old_method="${SCREENSHOT_METHOD:-}"
-    local old_pages="${SCREENSHOT_PAGES_COUNT:-}"
-    unset SCREENSHOT_METHOD SCREENSHOT_PAGES_COUNT
-
     # Konfiguration laden
     # shellcheck source=/dev/null
     source "$update_cfg_file"
-
-    if [ -n "${SCREENSHOT_METHOD:-}" ] || [ -n "$old_method" ]; then
-        log_check_item "INFO" "Veraltete Option 'SCREENSHOT_METHOD' in $(basename "$update_cfg_file") wird ignoriert (Screenshots nutzen jetzt zentral Gotenberg 9)" "$run_log"
-        unset SCREENSHOT_METHOD
-    fi
-    if [ -n "${SCREENSHOT_PAGES_COUNT:-}" ] || [ -n "$old_pages" ]; then
-        log_check_item "INFO" "Veraltete Option 'SCREENSHOT_PAGES_COUNT' in $(basename "$update_cfg_file") wird ignoriert (Pfade werden über SCREENSHOT_PATHS definiert)" "$run_log"
-        unset SCREENSHOT_PAGES_COUNT
-    fi
 
     local final_status="gruen"
     local final_exitcode=0

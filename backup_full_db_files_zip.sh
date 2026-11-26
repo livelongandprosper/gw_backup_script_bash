@@ -266,7 +266,7 @@ function is_valid_project_selection() {
 
 function reset_project_config_variables() {
     local config_var
-    for config_var in PROJECT_NAME PROJEKT_BASIS_DATEINAME DEFAULT_SCOPE DB_COUNT DB_HOST DB_NAME DB_USER DB_PASSWORD DB2_HOST DB2_NAME DB2_USER DB2_PASSWORD SOURCE_FILES_DIR SFTP_HOST SFTP_PORT SFTP_KEY SFTP_USER SFTP_DIRECTORY SFTP_PATH_TO_SSH_BINARY RSYNC_HOST RSYNC_USER RSYNC_DIRECTORY RSYNC_KEY RETENTION_MODE KEEP_DAILY_DAYS KEEP_WEEKLY_DAYS KEEP_MONTHLY_DAYS KEEP_MIN_SETS RETENTION_REMOTE BACKUP_LIVE_TIME DELETE_IF_TRANSMITTED HEALTHCHECK_URL STATUS_EMAIL_ADDRESS ALERT_EMAIL_ADDRESS; do
+    for config_var in PROJECT_NAME PROJEKT_BASIS_DATEINAME DEFAULT_SCOPE DB_COUNT SOURCE_FILES_DIR SFTP_HOST SFTP_PORT SFTP_KEY SFTP_USER SFTP_DIRECTORY SFTP_PATH_TO_SSH_BINARY RSYNC_HOST RSYNC_USER RSYNC_DIRECTORY RSYNC_KEY RETENTION_MODE KEEP_DAILY_DAYS KEEP_WEEKLY_DAYS KEEP_MONTHLY_DAYS KEEP_MIN_SETS RETENTION_REMOTE DELETE_IF_TRANSMITTED HEALTHCHECK_URL STATUS_EMAIL_ADDRESS ALERT_EMAIL_ADDRESS; do
         printf -v "$config_var" '%s' ''
     done
     unset SOURCE_FILES_DIR_IGNORE
@@ -700,15 +700,12 @@ function apply_retention_local() {
 
     local PROJEKT_BASIS_DATEINAME=""
     local RETENTION_MODE=""
-    local BACKUP_LIVE_TIME=""
     local KEEP_DAILY_DAYS=""
     local KEEP_WEEKLY_DAYS=""
     local KEEP_MONTHLY_DAYS=""
     local KEEP_MIN_SETS=""
     local SOURCE_FILES_DIR=""
     local DB_COUNT=""
-    local DB_NAME=""
-    local DB2_NAME=""
 
     reset_project_config_variables
     # shellcheck source=/dev/null
@@ -720,16 +717,9 @@ function apply_retention_local() {
     local backup_dir="$p_env_dir/$p_basis/"
     [ -d "$backup_dir" ] || return 0
 
-    local ret_mode="${RETENTION_MODE:-}"
-    if [ -z "$ret_mode" ]; then
-        if [ -n "$BACKUP_LIVE_TIME" ] && [ "$BACKUP_LIVE_TIME" -gt 0 ] 2>/dev/null; then
-            ret_mode="tage"
-        else
-            ret_mode="aus"
-        fi
-    fi
+    local ret_mode="${RETENTION_MODE:-aus}"
 
-    local daily_days="${KEEP_DAILY_DAYS:-${BACKUP_LIVE_TIME:-30}}"
+    local daily_days="${KEEP_DAILY_DAYS:-30}"
     local weekly_days="${KEEP_WEEKLY_DAYS:-90}"
     local monthly_days="${KEEP_MONTHLY_DAYS:-365}"
     local min_sets="${KEEP_MIN_SETS:-3}"
@@ -744,9 +734,6 @@ function apply_retention_local() {
             local d_var="DB_${d_i}_NAME"
             [ -n "${!d_var:-}" ] && exp_dbs+=("${!d_var}")
         done
-    else
-        [ -n "$DB_NAME" ] && exp_dbs+=("$DB_NAME")
-        [ -n "$DB2_NAME" ] && exp_dbs+=("$DB2_NAME")
     fi
 
     RAW_FILES=()
@@ -828,7 +815,6 @@ function apply_retention_remote() {
 
     local PROJEKT_BASIS_DATEINAME=""
     local RETENTION_MODE=""
-    local BACKUP_LIVE_TIME=""
     local KEEP_DAILY_DAYS=""
     local KEEP_WEEKLY_DAYS=""
     local KEEP_MONTHLY_DAYS=""
@@ -836,8 +822,6 @@ function apply_retention_remote() {
     local RETENTION_REMOTE="yes"
     local SOURCE_FILES_DIR=""
     local DB_COUNT=""
-    local DB_NAME=""
-    local DB2_NAME=""
 
     local SFTP_HOST=""
     local SFTP_PORT="22"
@@ -888,16 +872,9 @@ function apply_retention_remote() {
         return 0
     fi
 
-    local ret_mode="${RETENTION_MODE:-}"
-    if [ -z "$ret_mode" ]; then
-        if [ -n "$BACKUP_LIVE_TIME" ] && [ "$BACKUP_LIVE_TIME" -gt 0 ] 2>/dev/null; then
-            ret_mode="tage"
-        else
-            ret_mode="aus"
-        fi
-    fi
+    local ret_mode="${RETENTION_MODE:-aus}"
 
-    local daily_days="${KEEP_DAILY_DAYS:-${BACKUP_LIVE_TIME:-30}}"
+    local daily_days="${KEEP_DAILY_DAYS:-30}"
     local weekly_days="${KEEP_WEEKLY_DAYS:-90}"
     local monthly_days="${KEEP_MONTHLY_DAYS:-365}"
     local min_sets="${KEEP_MIN_SETS:-3}"
@@ -912,9 +889,6 @@ function apply_retention_remote() {
             local d_var="DB_${d_i}_NAME"
             [ -n "${!d_var:-}" ] && exp_dbs+=("${!d_var}")
         done
-    else
-        [ -n "$DB_NAME" ] && exp_dbs+=("$DB_NAME")
-        [ -n "$DB2_NAME" ] && exp_dbs+=("$DB2_NAME")
     fi
 
     # SFTP Batch zur Dateiliste erstellen
@@ -1439,26 +1413,25 @@ function write_project_env_file() {
     local def_scope="$4"
     local src_dir="$5"
     local ignore_literal="$6"
-    local b_live_time="$7"
-    local del_transmitted="$8"
-    local s_host="$9"
-    local s_port="${10}"
-    local s_user="${11}"
-    local s_key="${12}"
-    local s_dir="${13}"
-    local s_ssh_bin="${14}"
-    local r_host="${15}"
-    local r_user="${16}"
-    local r_dir="${17}"
-    local r_key="${18}"
-    local healthcheck_url="${19:-}"
-    local ret_mode="${20:-staffel}"
-    local k_daily="${21:-30}"
-    local k_weekly="${22:-90}"
-    local k_monthly="${23:-365}"
-    local k_min="${24:-3}"
-    local ret_remote="${25:-yes}"
-    shift 25 2>/dev/null || shift $#
+    local del_transmitted="$7"
+    local s_host="$8"
+    local s_port="$9"
+    local s_user="${10}"
+    local s_key="${11}"
+    local s_dir="${12}"
+    local s_ssh_bin="${13}"
+    local r_host="${14}"
+    local r_user="${15}"
+    local r_dir="${16}"
+    local r_key="${17}"
+    local healthcheck_url="${18:-}"
+    local ret_mode="${19:-staffel}"
+    local k_daily="${20:-30}"
+    local k_weekly="${21:-90}"
+    local k_monthly="${22:-365}"
+    local k_min="${23:-3}"
+    local ret_remote="${24:-yes}"
+    shift 24 2>/dev/null || shift $#
     local dbs=("$@")
 
     local count=${#dbs[@]}
@@ -1470,7 +1443,7 @@ function write_project_env_file() {
         echo "FEHLER: Ungültiger Aufbewahrungsmodus '$ret_mode' für '$proj_name' (erlaubt: staffel, tage, aus)." >&2
         return 1
     fi
-    for retention_value in "$b_live_time" "$k_daily" "$k_weekly" "$k_monthly" "$k_min"; do
+    for retention_value in "$k_daily" "$k_weekly" "$k_monthly" "$k_min"; do
         if ! [[ "$retention_value" =~ ^[0-9]+$ ]]; then
             echo "FEHLER: Aufbewahrungswerte für '$proj_name' müssen nichtnegative Ganzzahlen sein." >&2
             return 1
@@ -1555,8 +1528,6 @@ KEEP_MONTHLY_DAYS=$k_monthly
 KEEP_MIN_SETS=$k_min
 RETENTION_REMOTE='$quoted_ret_remote'
 
-# Veraltet (wird bei fehlendem RETENTION_MODE als Fallback 'tage' genutzt):
-BACKUP_LIVE_TIME='$b_live_time'
 DELETE_IF_TRANSMITTED='$quoted_del_transmitted'
 
 # Healthchecks.io Alarmierung (Ping bei Start mit /start, bei Ende mit /<exitcode>)
@@ -1848,7 +1819,7 @@ function scan_and_setup_wordpress_sites() {
                 continue
             fi
         fi
-        if ! write_project_env_file "$target_env_file" "$project_name" "$basis_name" "$default_scope" "$source_files_dir" "$source_files_dir_ignore_literal" "0" "$delete_if_transmitted" "$sftp_host" "$sftp_port" "$sftp_user" "$sftp_key" "$sftp_directory" "$sftp_path_to_ssh_binary" "$rsync_host" "$rsync_user" "$rsync_directory" "$rsync_key" "" "staffel" "30" "90" "365" "3" "yes" "$db_host" "$db_name" "$db_user" "$db_pass"; then
+        if ! write_project_env_file "$target_env_file" "$project_name" "$basis_name" "$default_scope" "$source_files_dir" "$source_files_dir_ignore_literal" "$delete_if_transmitted" "$sftp_host" "$sftp_port" "$sftp_user" "$sftp_key" "$sftp_directory" "$sftp_path_to_ssh_binary" "$rsync_host" "$rsync_user" "$rsync_directory" "$rsync_key" "" "staffel" "30" "90" "365" "3" "yes" "$db_host" "$db_name" "$db_user" "$db_pass"; then
             continue
         fi
 
@@ -2107,7 +2078,6 @@ function run_setup_assistant() {
     local keep_monthly_days=365
     local keep_min_sets=3
     local retention_remote="yes"
-    local backup_live_time=0
 
     if [ "$retention_mode" = "staffel" ]; then
         read -rp "Tägliche Backups behalten (Tage) [30]: " input_k_daily
@@ -2122,8 +2092,7 @@ function run_setup_assistant() {
         retention_remote="${input_ret_remote:-yes}"
     elif [ "$retention_mode" = "tage" ]; then
         read -rp "Backup-Lebenszeit in Tagen (0 = unendlich) [30]: " input_live_time
-        backup_live_time="$(normalize_nonnegative_integer "${input_live_time:-30}" 30)"
-        keep_daily_days="$backup_live_time"
+        keep_daily_days="$(normalize_nonnegative_integer "${input_live_time:-30}" 30)"
         read -rp "Aufbewahrungsregel auch auf dem Fernziel anwenden? (yes/no) [yes]: " input_ret_remote
         retention_remote="${input_ret_remote:-yes}"
     fi
@@ -2144,7 +2113,7 @@ function run_setup_assistant() {
         db_args+=("${db_hosts[$i]}" "${db_names[$i]}" "${db_users[$i]}" "${db_passwords[$i]}")
     done
 
-    if ! write_project_env_file "$target_env_file" "$project_name" "$projekt_basis_dateiname" "$default_scope" "$source_files_dir" "$source_files_dir_ignore_literal" "$backup_live_time" "$delete_if_transmitted" "$sftp_host" "$sftp_port" "$sftp_user" "$sftp_key" "$sftp_directory" "$sftp_path_to_ssh_binary" "$rsync_host" "$rsync_user" "$rsync_directory" "$rsync_key" "$healthcheck_url" "$retention_mode" "$keep_daily_days" "$keep_weekly_days" "$keep_monthly_days" "$keep_min_sets" "$retention_remote" "${db_args[@]}"; then
+    if ! write_project_env_file "$target_env_file" "$project_name" "$projekt_basis_dateiname" "$default_scope" "$source_files_dir" "$source_files_dir_ignore_literal" "$delete_if_transmitted" "$sftp_host" "$sftp_port" "$sftp_user" "$sftp_key" "$sftp_directory" "$sftp_path_to_ssh_binary" "$rsync_host" "$rsync_user" "$rsync_directory" "$rsync_key" "$healthcheck_url" "$retention_mode" "$keep_daily_days" "$keep_weekly_days" "$keep_monthly_days" "$keep_min_sets" "$retention_remote" "${db_args[@]}"; then
         echo "FEHLER: Projekt-Konfiguration wurde nicht geschrieben." >&2
         return 1
     fi
@@ -2173,12 +2142,6 @@ function refresh_env_files() {
             env_files+=("$candidate_env_file")
         fi
     done
-
-    # Abwärtskompatibilität: eine einzelne alte .env-Datei (ohne Projektnamen) wird als "default"-Projekt behandelt
-    legacy_env_file="$basename/.env"
-    if [ -f "$legacy_env_file" ]; then
-        env_files+=("$legacy_env_file")
-    fi
 }
 
 refresh_env_files
@@ -2186,13 +2149,9 @@ refresh_env_files
 # Hilfsfunktion: liest den Projektnamen aus einer .env-Datei-Pfadangabe ab
 function project_name_from_env_file() {
     local file="$1"
-    if [ "$file" == "$legacy_env_file" ]; then
-        echo "default"
-    else
-        local file_basename
-        file_basename="$(basename "$file")"
-        echo "${file_basename#.env.}"
-    fi
+    local file_basename
+    file_basename="$(basename "$file")"
+    echo "${file_basename#.env.}"
 }
 
 # Datenbank aus einem vorhandenen Backup wiederherstellen
@@ -2226,19 +2185,6 @@ function run_restore_for_project() {
             db_users+=("${!user_var}")
             db_passwords+=("${!password_var}")
         done
-    else
-        if [ -n "$DB_NAME" ]; then
-            db_hosts+=("${DB_HOST:-localhost}")
-            db_names+=("$DB_NAME")
-            db_users+=("$DB_USER")
-            db_passwords+=("$DB_PASSWORD")
-        fi
-        if [ -n "$DB2_NAME" ]; then
-            db_hosts+=("${DB2_HOST:-localhost}")
-            db_names+=("$DB2_NAME")
-            db_users+=("$DB2_USER")
-            db_passwords+=("$DB2_PASSWORD")
-        fi
     fi
 
     if [ "${#db_names[@]}" -eq 0 ]; then
@@ -2358,10 +2304,6 @@ function show_project_overview() {
         source "$overview_env_file"
 
         local overview_db_count="${DB_COUNT:-0}"
-        if [ "$overview_db_count" -eq 0 ] 2>/dev/null; then
-            [ -n "$DB_NAME" ] && overview_db_count=$((overview_db_count + 1))
-            [ -n "$DB2_NAME" ] && overview_db_count=$((overview_db_count + 1))
-        fi
 
         local overview_basis="${PROJEKT_BASIS_DATEINAME:-$overview_project_name}"
         local overview_backup_dir="$basename/$overview_basis/"
@@ -2814,13 +2756,12 @@ function convert_project_env_to_staffel() {
     local KEEP_MONTHLY_DAYS=""
     local KEEP_MIN_SETS=""
     local RETENTION_REMOTE=""
-    local BACKUP_LIVE_TIME=""
 
     reset_project_config_variables
     # shellcheck source=/dev/null
     source "$env_f"
 
-    local current_k_daily="${KEEP_DAILY_DAYS:-${BACKUP_LIVE_TIME:-30}}"
+    local current_k_daily="${KEEP_DAILY_DAYS:-30}"
     [ "$current_k_daily" -eq 0 ] 2>/dev/null && current_k_daily=30
     local current_k_weekly="${KEEP_WEEKLY_DAYS:-90}"
     local current_k_monthly="${KEEP_MONTHLY_DAYS:-365}"
@@ -2856,7 +2797,6 @@ function show_retention_dry_run() {
 
     local PROJEKT_BASIS_DATEINAME=""
     local RETENTION_MODE=""
-    local BACKUP_LIVE_TIME=""
     local KEEP_DAILY_DAYS=""
     local KEEP_WEEKLY_DAYS=""
     local KEEP_MONTHLY_DAYS=""
@@ -2864,8 +2804,6 @@ function show_retention_dry_run() {
     local RETENTION_REMOTE="yes"
     local SOURCE_FILES_DIR=""
     local DB_COUNT=""
-    local DB_NAME=""
-    local DB2_NAME=""
 
     reset_project_config_variables
     # shellcheck source=/dev/null
@@ -2876,16 +2814,9 @@ function show_retention_dry_run() {
     local p_basis="${PROJEKT_BASIS_DATEINAME:-$p_name}"
     local backup_dir="$p_env_dir/$p_basis/"
 
-    local ret_mode="${RETENTION_MODE:-}"
-    if [ -z "$ret_mode" ]; then
-        if [ -n "$BACKUP_LIVE_TIME" ] && [ "$BACKUP_LIVE_TIME" -gt 0 ] 2>/dev/null; then
-            ret_mode="tage"
-        else
-            ret_mode="aus"
-        fi
-    fi
+    local ret_mode="${RETENTION_MODE:-aus}"
 
-    local daily_days="${KEEP_DAILY_DAYS:-${BACKUP_LIVE_TIME:-30}}"
+    local daily_days="${KEEP_DAILY_DAYS:-30}"
     local weekly_days="${KEEP_WEEKLY_DAYS:-90}"
     local monthly_days="${KEEP_MONTHLY_DAYS:-365}"
     local min_sets="${KEEP_MIN_SETS:-3}"
@@ -2900,9 +2831,6 @@ function show_retention_dry_run() {
             local d_var="DB_${d_i}_NAME"
             [ -n "${!d_var:-}" ] && exp_dbs+=("${!d_var}")
         done
-    else
-        [ -n "$DB_NAME" ] && exp_dbs+=("$DB_NAME")
-        [ -n "$DB2_NAME" ] && exp_dbs+=("$DB2_NAME")
     fi
 
     echo "========================================================================================================================"
@@ -3439,7 +3367,7 @@ function run_backup_for_project() {
         run_scope="alles"
     fi
 
-    # Datenbanken einlesen (beliebig viele über DB_COUNT / DB_<n>_* oder altes DB_*/DB2_*-Format)
+    # Datenbanken einlesen (beliebig viele über DB_COUNT / DB_<n>_*)
     db_hosts=()
     db_names=()
     db_users=()
@@ -3455,20 +3383,6 @@ function run_backup_for_project() {
             db_users+=("${!user_var:-}")
             db_passwords+=("${!password_var:-}")
         done
-    else
-        # Abwärtskompatibilität zu älteren .env-Dateien mit DB_*/DB2_*
-        if [ -n "$DB_NAME" ]; then
-            db_hosts+=("${DB_HOST:-localhost}")
-            db_names+=("$DB_NAME")
-            db_users+=("$DB_USER")
-            db_passwords+=("$DB_PASSWORD")
-        fi
-        if [ -n "$DB2_NAME" ]; then
-            db_hosts+=("${DB2_HOST:-localhost}")
-            db_names+=("$DB2_NAME")
-            db_users+=("$DB2_USER")
-            db_passwords+=("$DB2_PASSWORD")
-        fi
     fi
 
     source_files_dir="${SOURCE_FILES_DIR:-}"
@@ -3504,7 +3418,6 @@ function run_backup_for_project() {
     rsync_directory="${RSYNC_DIRECTORY:-}"
     rsync_key="${RSYNC_KEY:-}"
 
-    backup_live_time="${BACKUP_LIVE_TIME:-0}"
     delete_if_transmitted="${DELETE_IF_TRANSMITTED:-false}"
 
     status_email_address="${STATUS_EMAIL_ADDRESS:-}"
@@ -3804,14 +3717,7 @@ function run_backup_for_project() {
     fi
 
     # Aufbewahrungsregeln (Retention / Großvater-Vater-Sohn) ausführen
-    local ret_mode="${RETENTION_MODE:-}"
-    if [ -z "$ret_mode" ]; then
-        if [ -n "$BACKUP_LIVE_TIME" ] && [ "$BACKUP_LIVE_TIME" -gt 0 ] 2>/dev/null; then
-            ret_mode="tage"
-        else
-            ret_mode="aus"
-        fi
-    fi
+    local ret_mode="${RETENTION_MODE:-aus}"
 
     if [ "$ret_mode" != "staffel" ]; then
         echo "Hinweis: Aufbewahrungsmodus steht auf '$ret_mode'. Die Großvater-Vater-Sohn-Staffelung (RETENTION_MODE='staffel') ist verfügbar." | tee -a "$log_file_name"
@@ -3976,9 +3882,7 @@ if [ "$retention_dry_run" == "true" ]; then
         done
     elif [ -n "$cli_project" ]; then
         match_env_file="$basename/.env.$cli_project"
-        if [ "$cli_project" == "default" ] && [ -f "$legacy_env_file" ]; then
-            show_retention_dry_run "$legacy_env_file"
-        elif [ -f "$match_env_file" ]; then
+        if [ -f "$match_env_file" ]; then
             show_retention_dry_run "$match_env_file"
         else
             echo "Kein Projekt '$cli_project' gefunden." >&2
@@ -4063,9 +3967,7 @@ if [ "$restore_mode" == "true" ]; then
     restore_target_env_file=''
     if [ -n "$cli_project" ]; then
         match_env_file="$basename/.env.$cli_project"
-        if [ "$cli_project" == "default" ] && [ -f "$legacy_env_file" ]; then
-            restore_target_env_file="$legacy_env_file"
-        elif [ -f "$match_env_file" ]; then
+        if [ -f "$match_env_file" ]; then
             restore_target_env_file="$match_env_file"
         else
             echo "Kein Projekt '$cli_project' gefunden." >&2
@@ -4105,9 +4007,7 @@ if [ "$check_mode" == "true" ]; then
         chk_target_env=''
         if [ -n "$cli_project" ]; then
             match_env_file="$basename/.env.$cli_project"
-            if [ "$cli_project" == "default" ] && [ -f "$legacy_env_file" ]; then
-                chk_target_env="$legacy_env_file"
-            elif [ -f "$match_env_file" ]; then
+            if [ -f "$match_env_file" ]; then
                 chk_target_env="$match_env_file"
             else
                 echo "Kein Projekt '$cli_project' gefunden." >&2
@@ -4152,9 +4052,7 @@ if [ "$cli_project" == "alle" ]; then
     selected_env_files=("${env_files[@]}")
 elif [ -n "$cli_project" ]; then
     match_env_file="$basename/.env.$cli_project"
-    if [ "$cli_project" == "default" ] && [ -f "$legacy_env_file" ]; then
-        selected_env_files=("$legacy_env_file")
-    elif [ -f "$match_env_file" ]; then
+    if [ -f "$match_env_file" ]; then
         selected_env_files=("$match_env_file")
     else
         if [ ! -t 0 ]; then

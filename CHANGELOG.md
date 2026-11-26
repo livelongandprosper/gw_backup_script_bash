@@ -41,6 +41,11 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
 ### Entfernt
 - **Veraltetes Hilfsskript `backup_sync_proxy_[projectname].sh`:**
   - Entfernung des nicht mehr benötigten Proxy-Sync-Skripts, da Remote-Übertragung und Bereinigung direkt und nativ über SFTP/Rsync im Hauptskript abgebildet werden.
+- **Abwärtskompatibilitäten restlos entfernt (`backup_full_db_files_zip.sh`, `update_wp.sh`, `.env.example`, `test_retention_suite.sh`, `README.md`):**
+  - Unterstützung für einzelne Legacy-`.env`-Dateien ohne Projektnamen (`"default"`-Projekt) aus beiden Skripten entfernt; es werden ausschließlich `.env.<projektname>`-Dateien verarbeitet.
+  - Altes Datenbank-Format (`DB_*`/`DB2_*`) entfernt; Datenbanken werden ausschließlich über `DB_COUNT` und `DB_<n>_*` konfiguriert.
+  - Veraltete Variable `BACKUP_LIVE_TIME` samt Fallback-Logik auf `RETENTION_MODE` / `KEEP_DAILY_DAYS` aus Skripten, `.env.example` und Retention-Tests entfernt (fehlt `RETENTION_MODE`, gilt sicher `'aus'`).
+  - Hinweise auf veraltete Update-Optionen (`SCREENSHOT_METHOD`, `SCREENSHOT_PAGES_COUNT`) aus `update_wp.sh` entfernt.
 
 ### Behoben
 - Korrigierte Argumentverschiebung beim WordPress-Scan, die Backup-Konfigurationswerte und Datenbankzugänge in falsche Variablen schrieb; ungültige oder verschobene Werte werden nun erkannt.

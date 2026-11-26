@@ -678,6 +678,70 @@ function run_wp() {
     $WP_CLI_BIN "$@"
 }
 
+# Leert vorhandene WordPress-Caches (Objekt-Cache, WP Rocket, WP Fastest Cache)
+function flush_wordpress_caches() {
+    local wp_path="$1"
+    local log_target="${2:-}"
+
+    # 1. WordPress Object-Cache
+    local flush_ok="false"
+    if [ -n "$log_target" ]; then
+        run_wp cache flush --path="$wp_path" 2>&1 | tee -a "$log_target" && flush_ok="true"
+    else
+        run_wp cache flush --path="$wp_path" && flush_ok="true"
+    fi
+    if [ "$flush_ok" = "true" ]; then
+        log_check_item "OK" "WordPress Objekt-Cache geleert (wp cache flush)" "$log_target"
+    else
+        log_check_item "WARN" "WordPress Objekt-Cache konnte nicht geleert werden" "$log_target"
+    fi
+
+    # 2. WP Rocket (falls aktiv & WP-CLI-Kommando verfügbar)
+    if run_wp cli has-command "rocket clean" --path="$wp_path" >/dev/null 2>&1; then
+        local rocket_ok="false"
+        if [ -n "$log_target" ]; then
+            run_wp rocket clean --confirm --path="$wp_path" 2>&1 | tee -a "$log_target" && rocket_ok="true"
+        else
+            run_wp rocket clean --confirm --path="$wp_path" && rocket_ok="true"
+        fi
+        if [ "$rocket_ok" = "true" ]; then
+            log_check_item "OK" "WP Rocket Cache geleert (wp rocket clean --confirm)" "$log_target"
+        else
+            log_check_item "WARN" "WP Rocket Cache konnte nicht geleert werden" "$log_target"
+        fi
+    fi
+
+    # 3. WP Fastest Cache (falls aktiv & WP-CLI-Kommando verfügbar)
+    if run_wp cli has-command "fastest-cache clear" --path="$wp_path" >/dev/null 2>&1; then
+        local wpfc_ok="false"
+        local wpfc_mode="all and minified"
+        if [ -n "$log_target" ]; then
+            if run_wp fastest-cache clear all and minified --path="$wp_path" 2>&1 | tee -a "$log_target"; then
+                wpfc_ok="true"
+            elif run_wp fastest-cache clear all --path="$wp_path" 2>&1 | tee -a "$log_target"; then
+                wpfc_ok="true"
+                wpfc_mode="all"
+            fi
+        else
+            if run_wp fastest-cache clear all and minified --path="$wp_path"; then
+                wpfc_ok="true"
+            elif run_wp fastest-cache clear all --path="$wp_path"; then
+                wpfc_ok="true"
+                wpfc_mode="all"
+            fi
+        fi
+        if [ "$wpfc_ok" = "true" ]; then
+            if [ "$wpfc_mode" = "all and minified" ]; then
+                log_check_item "OK" "WP Fastest Cache (inkl. minifizierter Assets) geleert" "$log_target"
+            else
+                log_check_item "OK" "WP Fastest Cache geleert (wp fastest-cache clear all)" "$log_target"
+            fi
+        else
+            log_check_item "WARN" "WP Fastest Cache konnte nicht geleert werden" "$log_target"
+        fi
+    fi
+}
+
 ################################
 ################################
 ################################
@@ -2367,10 +2431,9 @@ function run_update_for_project() {
         log_check_item "OK" "Sprachdateien aktualisiert" "$run_log"
     fi
 
-    # Cache leeren
-    echo "6/6: Objekt-Cache leeren ..." | tee -a "$run_log"
-    run_wp cache flush --path="$resolved_wp_path" 2>&1 | tee -a "$run_log" || true
-    log_check_item "OK" "Cache geleert" "$run_log"
+    # Caches leeren (Objekt-Cache + erkannte Cache-Plugins wie WP Rocket / WP Fastest Cache)
+    echo "6/6: Vorhandene Caches leeren ..." | tee -a "$run_log"
+    flush_wordpress_caches "$resolved_wp_path" "$run_log"
 
     # 8. Prüfung nachher (Post-Check)
     echo
@@ -2679,8 +2742,14 @@ EOF
     cat <<EOF >> "$rollback_file"
 
 echo
-echo "Objekt-Cache leeren ..."
+echo "Caches leeren ..."
 $WP_CLI_BIN cache flush --path="\$WP_PATH" 2>/dev/null || true
+if $WP_CLI_BIN cli has-command "rocket clean" --path="\$WP_PATH" >/dev/null 2>&1; then
+    $WP_CLI_BIN rocket clean --confirm --path="\$WP_PATH" 2>/dev/null || true
+fi
+if $WP_CLI_BIN cli has-command "fastest-cache clear" --path="\$WP_PATH" >/dev/null 2>&1; then
+    $WP_CLI_BIN fastest-cache clear all and minified --path="\$WP_PATH" 2>/dev/null || $WP_CLI_BIN fastest-cache clear all --path="\$WP_PATH" 2>/dev/null || true
+fi
 
 echo
 echo "======================================"

@@ -54,6 +54,8 @@ und das Projekt folgt den Grundsätzen des [Semantic Versioning](https://semver.
   - `run_pre_backup_checks()` prüft zusätzlich die Verfügbarkeit des Dump-Werkzeugs und nutzt bei fehlendem `mysql`-Client ebenfalls PHP für die DB-Erreichbarkeitsprüfung.
 - **Klar strukturierte Schritt-Überschriften im Backup-Lauf (`backup_full_db_files_zip.sh`):**
   - `print_backup_step()` hebt die einzelnen Backup-Phasen (`Schritt 2: Datenbank-Sicherung`, `Schritt 3: Datei-Sicherung (ZIP)`, `Schritt 4: Externe Übertragung`, `Schritt 5: Lokale Bereinigung nach Übertragung`, `Schritt 6: Aufbewahrungsregeln (Retention)`) visuell mit Abständen und Trennern auf Konsole und im Log hervor.
+- **Automatische Cache-Plugin-Leerung nach Updates (`update_wp.sh`):**
+  - Neue Funktion `flush_wordpress_caches()` leert nach Updates (vor dem Post-Check) sowie im generierten `rollback.sh` neben dem WordPress-Objekt-Cache (`wp cache flush`) automatisch vorhandene Page-Caches via WP-CLI (`wp cli has-command`): WP Rocket (`wp rocket clean --confirm`) und WP Fastest Cache (`wp fastest-cache clear all and minified`, mit Fallback auf `clear all`).
 
 ### Entfernt
 - **`sshpass`-Abhängigkeit entfernt (`backup_full_db_files_zip.sh`, `README.md`):**
